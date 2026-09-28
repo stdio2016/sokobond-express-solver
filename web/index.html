@@ -1,0 +1,890 @@
+<title>Sokobond Express Solver</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lexend:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+:root {
+  --bg: #e9eef2;
+  --panel: #f8fafb;
+  --ink: #18222d;
+  --muted: #5a6977;
+  --line: #cfd8e0;
+  --tile: #d9e1e8;
+  --tile-edge: #bcc8d3;
+  --void: #c4ced8;
+  --accent: #0d7a70;
+  --accent-soft: #0d7a7033;
+  --accent-ink: #ffffff;
+  --warn: #b4561b;
+  --h: #d8465c;
+  --o: #2d6bd0;
+  --n: #1b9567;
+  --c: #bf840f;
+  --x: #7c62c9;
+  --atom-text: #ffffff;
+  --radius: 10px;
+  --font: "Lexend", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0f151b;
+    --panel: #172029;
+    --ink: #e4ebf1;
+    --muted: #92a2b1;
+    --line: #29343f;
+    --tile: #222d38;
+    --tile-edge: #334252;
+    --void: #2b3743;
+    --accent: #33c2b3;
+    --accent-soft: #33c2b333;
+    --accent-ink: #062521;
+    --warn: #f0935a;
+    --h: #ec6076;
+    --o: #4f8ae8;
+    --n: #2fb37f;
+    --c: #d9a02a;
+    --x: #9a83e3;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0f151b;
+  --panel: #172029;
+  --ink: #e4ebf1;
+  --muted: #92a2b1;
+  --line: #29343f;
+  --tile: #222d38;
+  --tile-edge: #334252;
+  --void: #2b3743;
+  --accent: #33c2b3;
+  --accent-soft: #33c2b333;
+  --accent-ink: #062521;
+  --warn: #f0935a;
+  --h: #ec6076;
+  --o: #4f8ae8;
+  --n: #2fb37f;
+  --c: #d9a02a;
+  --x: #9a83e3;
+}
+* { box-sizing: border-box; }
+html, body { background: var(--bg); color: var(--ink); }
+body { margin: 0; font: 14px/1.5 var(--font); padding: 0 16px; }
+.app { max-width: 1180px; margin: 0 auto; padding-block: 24px 40px; display: grid; gap: 20px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; }
+h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+h1 .dot { color: var(--accent); }
+header p { margin: 0; color: var(--muted); max-width: 60ch; }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+@media (max-width: 860px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; display: grid; gap: 12px; }
+.panel h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+.stage { display: grid; gap: 12px; }
+.side { display: grid; gap: 16px; }
+.tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tools .sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 4px; }
+button, select, input, textarea { font: inherit; color: inherit; }
+.tool, .btn {
+  border: 1px solid var(--line); background: var(--panel); border-radius: 8px;
+  padding: 6px 10px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; min-height: 34px;
+}
+.tool:hover, .btn:hover { border-color: var(--muted); }
+.tool[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.swatch { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
+.sq { width: 14px; height: 14px; border-radius: 3px; display: inline-block; background: var(--tile); border: 1px solid var(--tile-edge); }
+.sq.void { background: transparent; border: 1px dashed var(--void); }
+.board-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; overflow-x: auto; display: flex; justify-content: center; }
+#board { display: block; max-width: 100%; height: auto; touch-action: none; user-select: none; }
+.hint { color: var(--muted); font-size: 12.5px; margin: 0; }
+.playback { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.playback input[type=range] { flex: 1 1 160px; accent-color: var(--accent); }
+.steplabel { font-family: var(--mono); font-size: 13px; color: var(--muted); min-width: 9ch; text-align: right; font-variant-numeric: tabular-nums; }
+.moves { display: flex; flex-wrap: wrap; gap: 4px; }
+.move { font-family: var(--mono); border: 1px solid var(--line); background: var(--panel); border-radius: 6px; width: 34px; height: 34px; cursor: pointer; display: grid; place-items: center; font-size: 15px; position: relative; }
+.move small { position: absolute; top: 1px; left: 3px; font-size: 8px; color: var(--muted); }
+.move.done { background: var(--accent-soft); border-color: transparent; }
+.move.cur { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.move.cur small { color: var(--accent-ink); }
+.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.field { display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); }
+.field input, .field select { border: 1px solid var(--line); background: var(--bg); border-radius: 7px; padding: 5px 8px; min-height: 32px; color: var(--ink); }
+.field input[type=number] { width: 72px; }
+.check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; cursor: pointer; }
+.check input { margin-top: 3px; accent-color: var(--accent); }
+textarea { width: 100%; min-height: 170px; resize: vertical; font-family: var(--mono); font-size: 14px; line-height: 1.35; border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 10px; color: var(--ink); tab-size: 4; }
+.status { font-size: 13px; padding: 10px 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); }
+.status.ok { border-color: var(--accent); }
+.status.err { border-color: var(--warn); color: var(--warn); }
+.status b { font-weight: 600; }
+.solution { font-family: var(--mono); word-break: break-all; font-size: 13px; }
+details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+details dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 8px 0 0; font-size: 12.5px; }
+details dt { font-family: var(--mono); font-weight: 600; }
+details dd { margin: 0; color: var(--muted); }
+.file-btn input { display: none; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="app">
+  <header>
+    <h1>Sokobond Express<span class="dot">.</span> Solver</h1>
+    <p>Draw or paste a level, then solve for the shortest path from the player's atom to the exit.</p>
+  </header>
+
+  <main class="layout">
+    <section class="stage">
+      <div class="tools" id="tools" role="toolbar" aria-label="Level editor tools"></div>
+      <div class="board-wrap"><svg id="board" aria-label="Level board"></svg></div>
+      <p class="hint" id="hint">Click or drag on the board to paint with the selected tool.</p>
+      <div class="panel" id="result-panel" hidden>
+        <div class="playback">
+          <button class="btn" id="first" title="First step (Home)">⏮</button>
+          <button class="btn" id="prev" title="Previous step (←)">◀</button>
+          <button class="btn primary" id="play" title="Play (Space)">Play</button>
+          <button class="btn" id="next" title="Next step (→)">▶</button>
+          <input type="range" id="scrub" min="0" max="0" value="0" aria-label="Step">
+          <span class="steplabel" id="steplabel">0 / 0</span>
+        </div>
+        <div class="moves" id="moves"></div>
+      </div>
+    </section>
+
+    <aside class="side">
+      <div class="panel">
+        <h2>Level</h2>
+        <div class="row">
+          <label class="field" for="sample">Load
+            <select id="sample"></select>
+          </label>
+          <label class="btn file-btn" for="file">Open file…<input type="file" id="file" accept=".txt,.lvl,text/plain"></label>
+        </div>
+        <div class="row">
+          <label class="field" for="w">Width <input type="number" id="w" min="1" max="24"></label>
+          <label class="field" for="h">Height <input type="number" id="h" min="1" max="24"></label>
+          <label class="field" for="startDir">Start leaves
+            <select id="startDir"><option value="">any way</option><option value="U">↑ up</option><option value="D">↓ down</option><option value="L">← left</option><option value="R">→ right</option></select>
+          </label>
+          <label class="field" for="exitDir">Exit entered
+            <select id="exitDir"><option value="">any way</option><option value="U">↑ up</option><option value="D">↓ down</option><option value="L">← left</option><option value="R">→ right</option></select>
+          </label>
+        </div>
+        <label class="field" for="text">Level text
+          <textarea id="text" spellcheck="false" autocomplete="off"></textarea>
+        </label>
+        <details>
+          <summary>Text format</summary>
+          <dl>
+            <dt>.</dt><dd>level tile</dd>
+            <dt>E</dt><dd>exit</dd>
+            <dt># or space</dt><dd>outside the level</dd>
+            <dt>H O N C</dt><dd>loose atoms with 1–4 electrons</dd>
+            <dt>h o n c</dt><dd>the player's atom</dd>
+            <dt>start=R</dt><dd>first move must go right (U D L R)</dd>
+            <dt>exit=D</dt><dd>last move must go down into the exit</dd>
+            <dt>valence: X=2</dt><dd>add a new element</dd>
+          </dl>
+        </details>
+      </div>
+
+      <div class="panel">
+        <h2>Solve</h2>
+        <label class="check" for="blockInitial"><input type="checkbox" id="blockInitial" checked> Path can't cross tiles where atoms start</label>
+        <label class="check" for="allAtoms"><input type="checkbox" id="allAtoms"> Every atom must join the molecule</label>
+        <div class="row">
+          <label class="field" for="maxLen">Max moves (0 = none) <input type="number" id="maxLen" min="0" value="0"></label>
+          <label class="field" for="limit">State limit <input type="number" id="limit" min="10000" step="100000" value="3000000" style="width:110px"></label>
+        </div>
+        <div class="row">
+          <button class="btn primary" id="solve">Solve</button>
+          <button class="btn" id="cancel" hidden>Stop</button>
+          <button class="btn" id="edit" hidden>Back to editing</button>
+        </div>
+        <div class="status" id="status">Ready.</div>
+      </div>
+    </aside>
+  </main>
+</div>
+
+<script type="text/plain" id="worker-src">
+"use strict";
+const STRIDE = 1024;
+const OFF = { U: -STRIDE, D: STRIDE, L: -1, R: 1 };
+const DK = ["U", "D", "L", "R"];
+
+self.onmessage = (e) => {
+  const t0 = performance.now();
+  try {
+    const res = solve(e.data);
+    res.ms = Math.round(performance.now() - t0);
+    self.postMessage(res);
+  } catch (err) {
+    self.postMessage({ type: "error", message: String(err && err.message || err) });
+  }
+};
+
+function solve(L) {
+  const n = L.pos.length;
+  const full = (1 << n) - 1;
+  const E = L.exit;
+  const tileBit = new Map();
+  L.tiles.forEach((p, k) => tileBit.set(p, 1n << BigInt(k)));
+  const tiles = new Set(L.tiles);
+  const { startDir, exitDir } = L;
+
+  const need = (s) => { let t = 0; for (let i = 0; i < n; i++) if (s.mol >> i & 1) t += s.free[i]; return t; };
+  const mk = (pos, mol, bonds, free) => ({ pos, mol, bonds, free, key: pos.join(",") + "|" + mol + "|" + free.join(",") });
+
+  function bond(pos, mol, bonds, free) {
+    let open = false;
+    for (let i = 0; i < n; i++) if ((mol >> i & 1) && free[i]) open = true;
+    if (!open) return mk(pos, mol, bonds, free);
+    free = free.slice(); bonds = bonds.slice();
+    const at = new Map();
+    pos.forEach((p, i) => at.set(p, i));
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const order = [];
+      for (let i = 0; i < n; i++) if (mol >> i & 1) order.push(i);
+      order.sort((a, b) => pos[a] - pos[b]);
+      for (const i of order) {
+        for (const d of DK) {
+          if (!free[i]) break;
+          const j = at.get(pos[i] + OFF[d]);
+          if (j === undefined || (mol >> j & 1) || !free[j]) continue;
+          bonds.push([Math.min(i, j), Math.max(i, j)]);
+          free[i]--; free[j]--;
+          mol |= 1 << j;
+          changed = true;
+        }
+      }
+    }
+    return mk(pos, mol, bonds, free);
+  }
+
+  function step(s, off) {
+    const occ = new Set();
+    for (let i = 0; i < n; i++) if (!(s.mol >> i & 1)) occ.add(s.pos[i]);
+    const pos = s.pos.slice();
+    for (let i = 0; i < n; i++) {
+      if (!(s.mol >> i & 1)) continue;
+      pos[i] += off;
+      if (occ.has(pos[i])) return null;
+    }
+    return bond(pos, s.mol, s.bonds, s.free);
+  }
+
+  function canFinish(s) {
+    if (!need(s)) return true;
+    for (let i = 0; i < n; i++) if (!(s.mol >> i & 1) && s.free[i]) return true;
+    return false;
+  }
+
+  // Can the path still reach the exit (from the right side) through unused tiles?
+  function exitReachable(lead, visited) {
+    let seen = visited | tileBit.get(lead);
+    const stack = [lead];
+    while (stack.length) {
+      const p = stack.pop();
+      for (const d of DK) {
+        const q = p + OFF[d];
+        if (q === E) {
+          if (!exitDir || d === exitDir) return true;
+          continue;
+        }
+        const b = tileBit.get(q);
+        if (b !== undefined && !(seen & b)) { seen |= b; stack.push(q); }
+      }
+    }
+    return false;
+  }
+
+  // Shortest route to the exit once the molecule can no longer bond (its shape is fixed).
+  function finish(s, visited, pathLen) {
+    const lead = s.pos[0];
+    const shape = [], blocked = new Set();
+    for (let i = 0; i < n; i++) {
+      if (s.mol >> i & 1) shape.push(s.pos[i] - lead); else blocked.add(s.pos[i]);
+    }
+    const fits = (p) => shape.every((o) => !blocked.has(p + o));
+    const inside = (p) => shape.every((o) => tiles.has(p + o));
+    const prev = new Map([[lead, null]]);
+    const queue = [lead];
+    for (let h = 0; h < queue.length; h++) {
+      const p = queue[h];
+      if (p === E) {
+        if (!inside(p)) return null;
+        const out = [];
+        let cur = p;
+        while (prev.get(cur)) { const [q, d] = prev.get(cur); out.push(d); cur = q; }
+        return out.reverse().join("");
+      }
+      for (const d of DK) {
+        if (p === lead && pathLen === 0 && startDir && d !== startDir) continue;
+        const q = p + OFF[d];
+        const b = tileBit.get(q);
+        if (b === undefined || (visited & b) || prev.has(q) || !fits(q)) continue;
+        if (q === E && exitDir && d !== exitDir) continue;
+        prev.set(q, [p, d]);
+        queue.push(q);
+      }
+    }
+    return null;
+  }
+
+  const start = bond(L.pos.slice(), 1, [], L.valence.slice());
+  let visited0 = tileBit.get(start.pos[0]);
+  if (L.blockInitial) for (let i = 1; i < n; i++) { const b = tileBit.get(L.pos[i]); if (b !== undefined) visited0 |= b; }
+
+  const seen = new Map([[start.key, [visited0]]]);
+  const queue = [[start, visited0, ""]];
+  let best = null, nodes = 0, depth = 0;
+  for (let h = 0; h < queue.length; h++) {
+    const [s, v, path] = queue[h];
+    queue[h] = undefined;
+    if (++nodes > L.limit) return { type: "limit", nodes, depth };
+    if (path.length > depth) {
+      depth = path.length;
+      self.postMessage({ type: "progress", nodes, depth });
+    } else if (nodes % 50000 === 0) self.postMessage({ type: "progress", nodes, depth });
+    if (best !== null && path.length >= best.length) break;
+    if (!need(s)) {
+      if (L.allAtoms && s.mol !== full) continue;
+      const rest = finish(s, v, path.length);
+      if (rest !== null && (best === null || path.length + rest.length < best.length)) best = path + rest;
+      continue;
+    }
+    if (s.pos[0] === E || (L.maxLen && path.length >= L.maxLen)) continue;
+    for (const d of DK) {
+      if (path.length === 0 && startDir && d !== startDir) continue;
+      const lead = s.pos[0] + OFF[d];
+      const b = tileBit.get(lead);
+      if (b === undefined || (v & b)) continue;
+      if (lead === E && exitDir && d !== exitDir) continue;
+      const nxt = step(s, OFF[d]);
+      if (!nxt || !canFinish(nxt)) continue;
+      if (lead === E && need(nxt)) continue; // the path ends on the exit
+      const nv = v | b;
+      if (lead !== E && !exitReachable(lead, nv)) continue;
+      let masks = seen.get(nxt.key);
+      if (!masks) { masks = []; seen.set(nxt.key, masks); }
+      if (masks.some((m) => (m & nv) === m)) continue;
+      masks.push(nv);
+      queue.push([nxt, nv, path + d]);
+    }
+  }
+  if (best === null || (L.maxLen && best.length > L.maxLen)) return { type: "none", nodes };
+
+  const frames = [start];
+  let s = start;
+  for (const d of best) { s = step(s, OFF[d]); frames.push(s); }
+  return {
+    type: "done", path: best, nodes,
+    frames: frames.map((f) => ({ pos: f.pos, mol: f.mol, bonds: f.bonds, free: f.free })),
+  };
+}
+</script>
+
+<script>
+"use strict";
+const VAL = { H: 1, O: 2, N: 3, C: 4 };
+const DIRV = { U: [-1, 0], D: [1, 0], L: [0, -1], R: [0, 1] };
+const ARROW = { U: "↑", D: "↓", L: "←", R: "→" };
+const STRIDE = 1024, BIAS = 512;
+const S = 56;
+const enc = (r, c) => (r + BIAS) * STRIDE + (c + BIAS);
+const dec = (p) => [Math.floor(p / STRIDE) - BIAS, (p % STRIDE) - BIAS];
+
+const SAMPLES = [
+  { name: "Water (straight line)", text: "start=R\nexit=R\n..H..\no...E\n..H.." },
+  { name: "Two corners", text: "start=U\nexit=U\nH....\n.....\no...E\n.....\n....H" },
+  { name: "Ammonia (15 moves)", text: "exit=R\n..H.....\n........\nn...H...\n........\n.H.....E\n........" },
+  { name: "Small starter", text: "#######\n#.....#\n#h.H.E#\n#.....#\n#######" },
+];
+
+const TOOLS = [
+  { id: "floor", label: "Tile", icon: '<span class="sq"></span>' },
+  { id: "void", label: "Hole", icon: '<span class="sq void"></span>' },
+  { id: "exit", label: "Exit", icon: "⇥" },
+  { sep: true },
+  { id: "H", label: "H", el: true },
+  { id: "O", label: "O", el: true },
+  { id: "N", label: "N", el: true },
+  { id: "C", label: "C", el: true },
+  { sep: true },
+  { id: "player", label: "Make player", icon: "◎" },
+  { id: "erase", label: "Remove atom", icon: "✕" },
+];
+
+let M = null;           // level model being edited
+let tool = "floor";
+let lastEl = "O";
+let sol = null;         // solved result for playback
+let cur = 0;
+let playTimer = null;
+let worker = null;
+
+const $ = (id) => document.getElementById(id);
+const valenceOf = (el) => (M.valence[el] ?? VAL[el] ?? 1);
+const colorOf = (el) => (VAL[el] !== undefined ? `var(--${el.toLowerCase()})` : "var(--x)");
+
+/* ---------- text <-> model ---------- */
+function parseLevel(text) {
+  const valence = {};
+  let startDir = "", exitDir = "";
+  const rows = [];
+  for (const raw of text.replace(/\r/g, "").split("\n")) {
+    let m;
+    if ((m = raw.match(/^\s*(start|exit)\s*[:=]\s*([a-z]*)\s*$/i))) {
+      const d = m[2].toUpperCase();
+      if (d && d !== "ANY" && !DIRV[d]) throw new Error(`"${raw.trim()}": use U, D, L or R.`);
+      if (m[1].toLowerCase() === "start") startDir = DIRV[d] ? d : ""; else exitDir = DIRV[d] ? d : "";
+      continue;
+    }
+    if ((m = raw.match(/^\s*valence\s*[:=]\s*(.*)$/i))) {
+      for (const part of m[1].split(/[,\s]+/).filter(Boolean)) {
+        const mm = part.match(/^([A-Za-z])=(\d+)$/);
+        if (!mm) throw new Error(`"${part}" in the valence line should look like X=2.`);
+        valence[mm[1].toUpperCase()] = +mm[2];
+      }
+      continue;
+    }
+    rows.push(raw.replace(/\s+$/, ""));
+  }
+  while (rows.length && !rows[0].trim()) rows.shift();
+  while (rows.length && !rows[rows.length - 1].trim()) rows.pop();
+  if (!rows.length) throw new Error("The level has no tiles.");
+  const h = rows.length, w = Math.max(...rows.map((r) => r.length));
+  const known = { ...VAL, ...valence };
+  const cells = [];
+  for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) {
+    const ch = rows[r][c] ?? " ";
+    if (ch === "#" || ch === " ") cells.push({ t: "void", atom: null });
+    else if (ch === ".") cells.push({ t: "floor", atom: null });
+    else if (ch === "E") cells.push({ t: "exit", atom: null });
+    else if (/[a-z]/i.test(ch) && known[ch.toUpperCase()] !== undefined)
+      cells.push({ t: "floor", atom: { el: ch.toUpperCase(), player: ch !== ch.toUpperCase() } });
+    else throw new Error(`Unknown tile "${ch}" at row ${r + 1}, column ${c + 1}. For a new element add a line like "valence: ${ch.toUpperCase()}=2".`);
+  }
+  return { w, h, cells, startDir, exitDir, valence };
+}
+
+function serialize(m) {
+  const lines = [];
+  if (m.startDir) lines.push("start=" + m.startDir);
+  if (m.exitDir) lines.push("exit=" + m.exitDir);
+  const extra = Object.entries(m.valence).filter(([k, v]) => VAL[k] !== v);
+  if (extra.length) lines.push("valence: " + extra.map(([k, v]) => `${k}=${v}`).join(", "));
+  for (let r = 0; r < m.h; r++) {
+    let s = "";
+    for (let c = 0; c < m.w; c++) {
+      const x = m.cells[r * m.w + c];
+      s += x.t === "void" ? "#" : x.t === "exit" ? "E" : x.atom ? (x.atom.player ? x.atom.el.toLowerCase() : x.atom.el) : ".";
+    }
+    lines.push(s);
+  }
+  return lines.join("\n");
+}
+
+function buildLevel() {
+  const tiles = [], atoms = [];
+  let exit = null, exits = 0;
+  for (let r = 0; r < M.h; r++) for (let c = 0; c < M.w; c++) {
+    const x = M.cells[r * M.w + c];
+    if (x.t === "void") continue;
+    tiles.push(enc(r, c));
+    if (x.t === "exit") { exit = enc(r, c); exits++; }
+    if (x.atom) atoms.push({ ...x.atom, p: enc(r, c) });
+  }
+  const players = atoms.filter((a) => a.player);
+  if (!players.length) throw new Error("Pick the player's atom: choose Make player and click an atom (or use a lowercase letter in the text).");
+  if (players.length > 1) throw new Error("There can be only one player atom.");
+  if (!exits) throw new Error("Place an exit tile (E).");
+  if (exits > 1) throw new Error("There can be only one exit.");
+  atoms.sort((a, b) => b.player - a.player);
+  return {
+    tiles, exit,
+    pos: atoms.map((a) => a.p),
+    elems: atoms.map((a) => a.el),
+    valence: atoms.map((a) => valenceOf(a.el)),
+    startDir: M.startDir, exitDir: M.exitDir,
+    blockInitial: $("blockInitial").checked,
+    allAtoms: $("allAtoms").checked,
+    maxLen: Math.max(0, +$("maxLen").value || 0),
+    limit: Math.max(10000, +$("limit").value || 3000000),
+  };
+}
+
+/* ---------- drawing ---------- */
+function tri(cx, cy, dir, size) {
+  const [dr, dc] = DIRV[dir];
+  const tip = [cx + dc * size, cy + dr * size];
+  const b1 = [cx - dc * size * 0.6 + dr * size * 0.8, cy - dr * size * 0.6 + dc * size * 0.8];
+  const b2 = [cx - dc * size * 0.6 - dr * size * 0.8, cy - dr * size * 0.6 - dc * size * 0.8];
+  return `${tip[0]},${tip[1]} ${b1[0]},${b1[1]} ${b2[0]},${b2[1]}`;
+}
+
+function currentAtoms() {
+  if (sol) {
+    const f = sol.frames[cur];
+    return {
+      atoms: f.pos.map((p, i) => { const [r, c] = dec(p); return { r, c, el: sol.elems[i], mol: !!(f.mol >> i & 1), free: f.free[i], player: i === 0 }; }),
+      bonds: f.bonds,
+    };
+  }
+  const atoms = [];
+  M.cells.forEach((x, k) => {
+    if (x.atom) atoms.push({ r: Math.floor(k / M.w), c: k % M.w, el: x.atom.el, mol: x.atom.player, free: valenceOf(x.atom.el), player: x.atom.player });
+  });
+  return { atoms, bonds: [] };
+}
+
+function draw() {
+  const svg = $("board");
+  let r0 = 0, c0 = 0, r1 = M.h - 1, c1 = M.w - 1;
+  if (sol) ({ r0, c0, r1, c1 } = sol.bounds);
+  const pad = 8;
+  const vx = c0 * S - pad, vy = r0 * S - pad, vw = (c1 - c0 + 1) * S + pad * 2, vh = (r1 - r0 + 1) * S + pad * 2;
+  svg.setAttribute("viewBox", `${vx} ${vy} ${vw} ${vh}`);
+  svg.setAttribute("width", vw);
+  svg.setAttribute("height", vh);
+  const out = [];
+  out.push(`<rect x="${vx}" y="${vy}" width="${vw}" height="${vh}" fill="transparent"/>`);
+
+  let startCell = null;
+  M.cells.forEach((x, k) => { if (x.atom && x.atom.player) startCell = [Math.floor(k / M.w), k % M.w]; });
+
+  // tiles
+  for (let r = 0; r < M.h; r++) for (let c = 0; c < M.w; c++) {
+    const x = M.cells[r * M.w + c];
+    const X = c * S, Y = r * S;
+    if (x.t === "void") {
+      if (!sol) out.push(`<rect x="${X + 5}" y="${Y + 5}" width="${S - 10}" height="${S - 10}" rx="7" fill="none" stroke="var(--void)" stroke-dasharray="3 4"/>`);
+      continue;
+    }
+    out.push(`<rect x="${X + 2}" y="${Y + 2}" width="${S - 4}" height="${S - 4}" rx="9" fill="var(--tile)" stroke="var(--tile-edge)"/>`);
+    if (!sol && x.atom && !x.atom.player && $("blockInitial").checked) {
+      out.push(`<path d="M${X + 9} ${Y + 9} l6 0 M${X + 9} ${Y + 9} l0 6" stroke="var(--tile-edge)" stroke-width="2" fill="none"/>`);
+    }
+  }
+
+  // start pad and exit
+  if (startCell) {
+    const [r, c] = startCell, X = c * S, Y = r * S;
+    out.push(`<rect x="${X + 7}" y="${Y + 7}" width="${S - 14}" height="${S - 14}" rx="7" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="4 3"/>`);
+    if (M.startDir) {
+      const [dr, dc] = DIRV[M.startDir];
+      out.push(`<polygon points="${tri(X + S / 2 + dc * S * 0.4, Y + S / 2 + dr * S * 0.4, M.startDir, 6)}" fill="var(--accent)"/>`);
+    }
+  }
+  M.cells.forEach((x, k) => {
+    if (x.t !== "exit") return;
+    const r = Math.floor(k / M.w), c = k % M.w, X = c * S, Y = r * S;
+    out.push(`<rect x="${X + 2}" y="${Y + 2}" width="${S - 4}" height="${S - 4}" rx="9" fill="var(--ink)"/>`);
+    out.push(`<rect x="${X + 10}" y="${Y + 10}" width="${S - 20}" height="${S - 20}" rx="5" fill="none" stroke="var(--bg)" stroke-width="2"/>`);
+    if (M.exitDir) {
+      const [dr, dc] = DIRV[M.exitDir];
+      out.push(`<polygon points="${tri(X + S / 2 - dc * S * 0.36, Y + S / 2 - dr * S * 0.36, M.exitDir, 6)}" fill="var(--accent)"/>`);
+    } else {
+      out.push(`<circle cx="${X + S / 2}" cy="${Y + S / 2}" r="4" fill="var(--bg)"/>`);
+    }
+  });
+
+  // path
+  if (sol) {
+    const pt = (f) => { const [r, c] = dec(f.pos[0]); return `${c * S + S / 2},${r * S + S / 2}`; };
+    out.push(`<polyline points="${sol.frames.map(pt).join(" ")}" fill="none" stroke="var(--accent)" stroke-opacity="0.35" stroke-width="3" stroke-dasharray="2 6" stroke-linecap="round" stroke-linejoin="round"/>`);
+    if (cur > 0) out.push(`<polyline points="${sol.frames.slice(0, cur + 1).map(pt).join(" ")}" fill="none" stroke="var(--accent)" stroke-opacity="0.8" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>`);
+  }
+
+  // bonds and atoms
+  const { atoms, bonds } = currentAtoms();
+  const count = new Map();
+  for (const [i, j] of bonds) { const k = i + "," + j; count.set(k, (count.get(k) || 0) + 1); }
+  for (const [k, m] of count) {
+    const [i, j] = k.split(",").map(Number);
+    const a = atoms[i], b = atoms[j];
+    const ax = a.c * S + S / 2, ay = a.r * S + S / 2, bx = b.c * S + S / 2, by = b.r * S + S / 2;
+    const nx = -(by - ay) / S, ny = (bx - ax) / S;
+    for (let t = 0; t < m; t++) {
+      const o = (t - (m - 1) / 2) * 8;
+      out.push(`<line x1="${ax + nx * o}" y1="${ay + ny * o}" x2="${bx + nx * o}" y2="${by + ny * o}" stroke="var(--ink)" stroke-width="5" stroke-linecap="round"/>`);
+    }
+  }
+  const R = S * 0.3;
+  for (const a of atoms) {
+    const cx = a.c * S + S / 2, cy = a.r * S + S / 2;
+    const offLevel = sol && !isTile(a.r, a.c);
+    out.push(`<g${offLevel ? ' opacity="0.55"' : ""}>`);
+    out.push(`<circle cx="${cx}" cy="${cy}" r="${R}" fill="${colorOf(a.el)}"${a.mol ? ' stroke="var(--ink)" stroke-width="3"' : ""}/>`);
+    out.push(`<text x="${cx}" y="${cy + 5.5}" text-anchor="middle" font-family="Lexend, system-ui, sans-serif" font-weight="700" font-size="16" fill="var(--atom-text)">${a.player ? a.el.toLowerCase() : a.el}</text>`);
+    for (let e = 0; e < a.free; e++) {
+      const ang = (-135 + e * (360 / Math.max(a.free, 4))) * Math.PI / 180;
+      out.push(`<circle cx="${cx + Math.cos(ang) * (R + 5)}" cy="${cy + Math.sin(ang) * (R + 5)}" r="3" fill="var(--ink)"/>`);
+    }
+    out.push("</g>");
+  }
+  svg.innerHTML = out.join("");
+}
+
+function isTile(r, c) {
+  return r >= 0 && c >= 0 && r < M.h && c < M.w && M.cells[r * M.w + c].t !== "void";
+}
+
+/* ---------- editing ---------- */
+function applyTool(r, c) {
+  if (r < 0 || c < 0 || r >= M.h || c >= M.w) return false;
+  const x = M.cells[r * M.w + c];
+  const before = JSON.stringify(x);
+  switch (tool) {
+    case "floor": x.t = "floor"; break;
+    case "void": x.t = "void"; x.atom = null; break;
+    case "exit":
+      M.cells.forEach((y) => { if (y.t === "exit") y.t = "floor"; });
+      x.t = "exit"; x.atom = null; break;
+    case "player":
+      M.cells.forEach((y) => { if (y.atom) y.atom.player = false; });
+      if (!x.atom) x.atom = { el: lastEl, player: true }; else x.atom.player = true;
+      if (x.t !== "floor") x.t = "floor";
+      break;
+    case "erase": x.atom = null; break;
+    default:
+      if (x.t !== "floor") x.t = "floor";
+      x.atom = { el: tool, player: x.atom ? x.atom.player : false };
+      lastEl = tool;
+  }
+  return JSON.stringify(x) !== before;
+}
+
+function modelChanged({ fromText = false } = {}) {
+  clearSolution();
+  if (!fromText) $("text").value = serialize(M);
+  $("w").value = M.w; $("h").value = M.h;
+  $("startDir").value = M.startDir; $("exitDir").value = M.exitDir;
+  try { localStorage.setItem("sokobond-level", $("text").value); } catch (e) {}
+  draw();
+}
+
+function resize(w, h) {
+  w = Math.min(24, Math.max(1, w | 0)); h = Math.min(24, Math.max(1, h | 0));
+  const cells = [];
+  for (let r = 0; r < h; r++) for (let c = 0; c < w; c++)
+    cells.push(r < M.h && c < M.w ? M.cells[r * M.w + c] : { t: "floor", atom: null });
+  M.w = w; M.h = h; M.cells = cells;
+  modelChanged();
+}
+
+function cellAt(evt) {
+  const svg = $("board");
+  const pt = svg.createSVGPoint();
+  pt.x = evt.clientX; pt.y = evt.clientY;
+  const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+  return [Math.floor(p.y / S), Math.floor(p.x / S)];
+}
+
+/* ---------- solving ---------- */
+function setStatus(html, kind = "") {
+  const el = $("status");
+  el.className = "status" + (kind ? " " + kind : "");
+  el.innerHTML = html;
+}
+
+function clearSolution() {
+  stopPlay();
+  if (!sol) return;
+  sol = null; cur = 0;
+  $("result-panel").hidden = true;
+  $("edit").hidden = true;
+  $("hint").hidden = false;
+  setStatus("Level changed. Press Solve to search again.");
+}
+
+function runSolve() {
+  let L;
+  try { L = buildLevel(); } catch (e) { setStatus(e.message, "err"); return; }
+  clearSolution();
+  if (worker) worker.terminate();
+  const url = URL.createObjectURL(new Blob([$("worker-src").textContent], { type: "text/javascript" }));
+  worker = new Worker(url);
+  URL.revokeObjectURL(url);
+  $("solve").disabled = true; $("cancel").hidden = false;
+  setStatus("Searching…");
+  const t0 = performance.now();
+  worker.onmessage = ({ data }) => {
+    if (data.type === "progress") {
+      setStatus(`Searching… <b>${data.nodes.toLocaleString()}</b> states, paths up to ${data.depth} moves.`);
+      return;
+    }
+    finishWorker();
+    const secs = ((data.ms ?? performance.now() - t0) / 1000).toFixed(2);
+    if (data.type === "done") showSolution(L, data, secs);
+    else if (data.type === "none") setStatus(`No solution. Searched ${data.nodes.toLocaleString()} states in ${secs}s.${L.maxLen ? " Try raising Max moves." : ""}`, "err");
+    else if (data.type === "limit") setStatus(`Stopped after ${data.nodes.toLocaleString()} states (paths up to ${data.depth} moves) without a solution. Raise the state limit to search further.`, "err");
+    else setStatus("Solver error: " + data.message, "err");
+  };
+  worker.onerror = (e) => { finishWorker(); setStatus("Solver error: " + e.message, "err"); };
+  worker.postMessage(L);
+}
+
+function finishWorker() {
+  if (worker) worker.terminate();
+  worker = null;
+  $("solve").disabled = false; $("cancel").hidden = true;
+}
+
+function showSolution(L, data, secs) {
+  let r0 = 0, c0 = 0, r1 = M.h - 1, c1 = M.w - 1;
+  for (const f of data.frames) for (const p of f.pos) {
+    const [r, c] = dec(p);
+    r0 = Math.min(r0, r); c0 = Math.min(c0, c); r1 = Math.max(r1, r); c1 = Math.max(c1, c);
+  }
+  sol = { path: data.path, frames: data.frames, elems: L.elems, bounds: { r0, c0, r1, c1 } };
+  cur = 0;
+  const arrows = [...data.path].map((d) => ARROW[d]).join("");
+  setStatus(`<b>Solved in ${data.path.length} moves</b> (${data.nodes.toLocaleString()} states, ${secs}s)<div class="solution">${data.path}<br>${arrows}</div>`, "ok");
+  $("moves").innerHTML = [...data.path].map((d, i) => `<button class="move" data-i="${i + 1}" title="Move ${i + 1}: ${d}"><small>${i + 1}</small>${ARROW[d]}</button>`).join("");
+  $("scrub").max = data.path.length;
+  $("result-panel").hidden = false;
+  $("edit").hidden = false;
+  $("hint").hidden = true;
+  go(0);
+}
+
+function go(i) {
+  if (!sol) return;
+  cur = Math.max(0, Math.min(sol.frames.length - 1, i));
+  $("scrub").value = cur;
+  $("steplabel").textContent = `${cur} / ${sol.path.length}`;
+  document.querySelectorAll(".move").forEach((b) => {
+    const k = +b.dataset.i;
+    b.classList.toggle("cur", k === cur);
+    b.classList.toggle("done", k < cur);
+  });
+  draw();
+}
+
+function stopPlay() {
+  clearInterval(playTimer); playTimer = null;
+  $("play").textContent = "Play";
+}
+function togglePlay() {
+  if (!sol) return;
+  if (playTimer) { stopPlay(); return; }
+  if (cur >= sol.path.length) go(0);
+  $("play").textContent = "Pause";
+  playTimer = setInterval(() => {
+    if (cur >= sol.path.length) { stopPlay(); return; }
+    go(cur + 1);
+  }, 420);
+}
+
+/* ---------- wiring ---------- */
+function buildToolbar() {
+  $("tools").innerHTML = TOOLS.map((t) => {
+    if (t.sep) return '<span class="sep"></span>';
+    const icon = t.el ? `<span class="swatch" style="background:${colorOf(t.id)}"></span>` : t.icon;
+    return `<button class="tool" data-tool="${t.id}" aria-pressed="${t.id === tool}">${icon}${t.label}</button>`;
+  }).join("");
+  $("tools").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-tool]");
+    if (!b) return;
+    tool = b.dataset.tool;
+    document.querySelectorAll("[data-tool]").forEach((x) => x.setAttribute("aria-pressed", x === b));
+  });
+}
+
+function loadText(text) {
+  try {
+    M = parseLevel(text);
+    $("text").value = text;
+    modelChanged({ fromText: true });
+    setStatus("Ready.");
+  } catch (e) { setStatus(e.message, "err"); }
+}
+
+function init() {
+  buildToolbar();
+  $("sample").innerHTML = '<option value="">Choose a sample…</option>' + SAMPLES.map((s, i) => `<option value="${i}">${s.name}</option>`).join("");
+  $("sample").addEventListener("change", (e) => {
+    if (e.target.value === "") return;
+    loadText(SAMPLES[+e.target.value].text);
+    e.target.value = "";
+  });
+  $("file").addEventListener("change", async (e) => {
+    const f = e.target.files[0];
+    if (f) loadText(await f.text());
+    e.target.value = "";
+  });
+
+  let typing;
+  $("text").addEventListener("input", () => {
+    clearTimeout(typing);
+    typing = setTimeout(() => {
+      try {
+        M = parseLevel($("text").value);
+        modelChanged({ fromText: true });
+        setStatus("Ready.");
+      } catch (e) { setStatus(e.message, "err"); }
+    }, 250);
+  });
+  $("w").addEventListener("change", () => resize(+$("w").value, M.h));
+  $("h").addEventListener("change", () => resize(M.w, +$("h").value));
+  $("startDir").addEventListener("change", (e) => { M.startDir = e.target.value; modelChanged(); });
+  $("exitDir").addEventListener("change", (e) => { M.exitDir = e.target.value; modelChanged(); });
+  $("blockInitial").addEventListener("change", () => { clearSolution(); draw(); });
+  $("allAtoms").addEventListener("change", clearSolution);
+
+  const board = $("board");
+  let painting = false;
+  board.addEventListener("pointerdown", (e) => {
+    if (sol) return;
+    painting = true;
+    board.setPointerCapture(e.pointerId);
+    const [r, c] = cellAt(e);
+    if (applyTool(r, c)) modelChanged();
+  });
+  board.addEventListener("pointermove", (e) => {
+    if (!painting || sol || !["floor", "void", "erase"].includes(tool)) return;
+    const [r, c] = cellAt(e);
+    if (applyTool(r, c)) modelChanged();
+  });
+  const stop = () => { painting = false; };
+  board.addEventListener("pointerup", stop);
+  board.addEventListener("pointercancel", stop);
+
+  $("solve").addEventListener("click", runSolve);
+  $("cancel").addEventListener("click", () => { finishWorker(); setStatus("Search stopped."); });
+  $("edit").addEventListener("click", () => { clearSolution(); setStatus("Ready."); draw(); });
+  $("first").addEventListener("click", () => { stopPlay(); go(0); });
+  $("prev").addEventListener("click", () => { stopPlay(); go(cur - 1); });
+  $("next").addEventListener("click", () => { stopPlay(); go(cur + 1); });
+  $("play").addEventListener("click", togglePlay);
+  $("scrub").addEventListener("input", (e) => { stopPlay(); go(+e.target.value); });
+  $("moves").addEventListener("click", (e) => {
+    const b = e.target.closest(".move");
+    if (b) { stopPlay(); go(+b.dataset.i); }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (!sol || e.target.closest("input, textarea, select")) return;
+    if (e.key === "ArrowRight") { stopPlay(); go(cur + 1); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { stopPlay(); go(cur - 1); e.preventDefault(); }
+    else if (e.key === "Home") { stopPlay(); go(0); e.preventDefault(); }
+    else if (e.key === " " && !e.target.closest("button")) { togglePlay(); e.preventDefault(); }
+  });
+
+  let saved = null;
+  try { saved = localStorage.getItem("sokobond-level"); } catch (e) {}
+  let ok = false;
+  if (saved) { try { M = parseLevel(saved); $("text").value = saved; ok = true; } catch (e) {} }
+  if (!ok) { M = parseLevel(SAMPLES[1].text); $("text").value = SAMPLES[1].text; }
+  modelChanged({ fromText: true });
+  setStatus("Ready. Press Solve to find the shortest path.");
+}
+init();
+</script>

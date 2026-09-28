@@ -194,8 +194,6 @@ details dd { margin: 0; color: var(--muted); }
 
       <div class="panel">
         <h2>Solve</h2>
-        <label class="check" for="blockInitial"><input type="checkbox" id="blockInitial" checked> Path can't cross tiles where atoms start</label>
-        <label class="check" for="allAtoms"><input type="checkbox" id="allAtoms"> Every atom must join the molecule</label>
         <div class="row">
           <label class="field" for="maxLen">Max moves (0 = none) <input type="number" id="maxLen" min="0" value="0"></label>
           <label class="field" for="limit">State limit <input type="number" id="limit" min="10000" step="100000" value="3000000" style="width:110px"></label>
@@ -230,7 +228,6 @@ self.onmessage = (e) => {
 
 function solve(L) {
   const n = L.pos.length;
-  const full = (1 << n) - 1;
   const E = L.exit;
   const tileBit = new Map();
   L.tiles.forEach((p, k) => tileBit.set(p, 1n << BigInt(k)));
@@ -258,8 +255,10 @@ function solve(L) {
           if (!free[i]) break;
           const j = at.get(pos[i] + OFF[d]);
           if (j === undefined || (mol >> j & 1) || !free[j]) continue;
-          bonds.push([Math.min(i, j), Math.max(i, j)]);
-          free[i]--; free[j]--;
+          // Neighbours with several free electrons form as many bonds as they can.
+          const k = Math.min(free[i], free[j]);
+          for (let b = 0; b < k; b++) bonds.push([Math.min(i, j), Math.max(i, j)]);
+          free[i] -= k; free[j] -= k;
           mol |= 1 << j;
           changed = true;
         }
@@ -280,10 +279,14 @@ function solve(L) {
     return bond(pos, s.mol, s.bonds, s.free);
   }
 
+  // Free electrons on atoms outside the molecule.
+  const looseFree = (s) => { let t = 0; for (let i = 0; i < n; i++) if (!(s.mol >> i & 1)) t += s.free[i]; return t; };
+
+  // Every atom must end neutral. Only the molecule can bond, so a molecule with
+  // no free electrons left strands any loose atom that still has some, and a
+  // molecule that still needs electrons needs a loose atom to supply them.
   function canFinish(s) {
-    if (!need(s)) return true;
-    for (let i = 0; i < n; i++) if (!(s.mol >> i & 1) && s.free[i]) return true;
-    return false;
+    return !need(s) === !looseFree(s);
   }
 
   // Can the path still reach the exit (from the right side) through unused tiles?
@@ -340,7 +343,8 @@ function solve(L) {
 
   const start = bond(L.pos.slice(), 1, [], L.valence.slice());
   let visited0 = tileBit.get(start.pos[0]);
-  if (L.blockInitial) for (let i = 1; i < n; i++) { const b = tileBit.get(L.pos[i]); if (b !== undefined) visited0 |= b; }
+  // The path can't pass over tiles where atoms start.
+  for (let i = 1; i < n; i++) { const b = tileBit.get(L.pos[i]); if (b !== undefined) visited0 |= b; }
 
   const seen = new Map([[start.key, [visited0]]]);
   const queue = [[start, visited0, ""]];
@@ -355,7 +359,7 @@ function solve(L) {
     } else if (nodes % 50000 === 0) self.postMessage({ type: "progress", nodes, depth });
     if (best !== null && path.length >= best.length) break;
     if (!need(s)) {
-      if (L.allAtoms && s.mol !== full) continue;
+      if (looseFree(s)) continue;
       const rest = finish(s, v, path.length);
       if (rest !== null && (best === null || path.length + rest.length < best.length)) best = path + rest;
       continue;
@@ -514,8 +518,6 @@ function buildLevel() {
     elems: atoms.map((a) => a.el),
     valence: atoms.map((a) => valenceOf(a.el)),
     startDir: M.startDir, exitDir: M.exitDir,
-    blockInitial: $("blockInitial").checked,
-    allAtoms: $("allAtoms").checked,
     maxLen: Math.max(0, +$("maxLen").value || 0),
     limit: Math.max(10000, +$("limit").value || 3000000),
   };
@@ -569,7 +571,7 @@ function draw() {
       continue;
     }
     out.push(`<rect x="${X + 2}" y="${Y + 2}" width="${S - 4}" height="${S - 4}" rx="9" fill="var(--tile)" stroke="var(--tile-edge)"/>`);
-    if (!sol && x.atom && !x.atom.player && $("blockInitial").checked) {
+    if (!sol && x.atom && !x.atom.player) {
       out.push(`<path d="M${X + 9} ${Y + 9} l6 0 M${X + 9} ${Y + 9} l0 6" stroke="var(--tile-edge)" stroke-width="2" fill="none"/>`);
     }
   }
@@ -837,8 +839,6 @@ function init() {
   $("h").addEventListener("change", () => resize(M.w, +$("h").value));
   $("startDir").addEventListener("change", (e) => { M.startDir = e.target.value; modelChanged(); });
   $("exitDir").addEventListener("change", (e) => { M.exitDir = e.target.value; modelChanged(); });
-  $("blockInitial").addEventListener("change", () => { clearSolution(); draw(); });
-  $("allAtoms").addEventListener("change", clearSolution);
 
   const board = $("board");
   let painting = false;

@@ -1,3 +1,4 @@
+<meta charset="utf-8">
 <title>Sokobond Express Solver</title>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -23,6 +24,8 @@
   --c: #bf840f;
   --x: #7c62c9;
   --atom-text: #ffffff;
+  --used: #b3bdc7;
+  --used-ink: #f5f7f9;
   --radius: 10px;
   --font: "Lexend", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -47,6 +50,8 @@
     --n: #2fb37f;
     --c: #d9a02a;
     --x: #9a83e3;
+  --used: #3b4652;
+  --used-ink: #8e9aa6;
   }
 }
 :root[data-theme="dark"] {
@@ -68,6 +73,8 @@
   --n: #2fb37f;
   --c: #d9a02a;
   --x: #9a83e3;
+  --used: #3b4652;
+  --used-ink: #8e9aa6;
 }
 * { box-sizing: border-box; }
 html, body { background: var(--bg); color: var(--ink); }
@@ -76,7 +83,7 @@ body { margin: 0; font: 14px/1.5 var(--font); padding: 0 16px; }
 header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; }
 h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
 h1 .dot { color: var(--accent); }
-header p { margin: 0; color: var(--muted); max-width: 60ch; }
+header p { margin: 0; color: var(--muted); flex-basis: 100%; }
 .layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
 @media (max-width: 860px) { .layout { grid-template-columns: minmax(0, 1fr); } }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; display: grid; gap: 12px; }
@@ -99,8 +106,9 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 .swatch { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
 .sq { width: 14px; height: 14px; border-radius: 3px; display: inline-block; background: var(--tile); border: 1px solid var(--tile-edge); }
 .sq.void { background: transparent; border: 1px dashed var(--void); }
-.board-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; overflow-x: auto; display: flex; justify-content: center; }
-#board { display: block; max-width: 100%; height: auto; touch-action: none; user-select: none; }
+.board-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; aspect-ratio: 4 / 3; max-width: 100%; }
+/* The board keeps one shape; the level scales to fit inside it. */
+#board { display: block; width: 100%; height: 100%; touch-action: none; user-select: none; }
 .hint { color: var(--muted); font-size: 12.5px; margin: 0; }
 .playback { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .playback input[type=range] { flex: 1 1 160px; accent-color: var(--accent); }
@@ -128,21 +136,66 @@ details dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; marg
 details dt { font-family: var(--mono); font-weight: 600; }
 details dd { margin: 0; color: var(--muted); }
 .file-btn input { display: none; }
+[hidden] { display: none !important; }
+/* Each mode shows only its own UI. */
+body:not([data-mode="edit"]) .edit-only,
+body:not([data-mode="solve"]) .solve-only,
+body:not([data-mode="try"]) .try-only,
+body[data-mode="try"] .side { display: none !important; }
+.modes { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; padding: 3px; gap: 2px; background: var(--panel); }
+.modes button { border: 0; background: none; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-weight: 500; color: var(--muted); }
+.modes button:hover { color: var(--ink); }
+.modes button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width: 760px; width: 100%; margin: 0 auto; }
+.tryrow { display: flex; flex-wrap: wrap; gap: 16px 24px; align-items: center; }
+.dpad { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(2, 44px); grid-template-areas: ". u ." "l d r"; gap: 4px; }
+.dpad .btn { justify-content: center; font-size: 18px; padding: 0; }
+.trystats { display: grid; gap: 8px; flex: 1 1 240px; }
+#trycount { text-align: left; color: var(--ink); font-weight: 600; }
+.status.win { border-color: var(--accent); background: var(--accent-soft); }
+#board.won { outline: 3px solid var(--accent); outline-offset: 4px; border-radius: 6px; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 
 <div class="app">
   <header>
     <h1>Sokobond Express<span class="dot">.</span> Solver</h1>
-    <p>Draw or paste a level, then solve for the shortest path from the player's atom to the exit.</p>
+    <div class="modes" role="group" aria-label="Mode">
+      <button data-mode="edit" aria-pressed="true">Edit</button>
+      <button data-mode="solve" aria-pressed="false">Solve</button>
+      <button data-mode="try" aria-pressed="false">Try</button>
+    </div>
+    <p class="edit-only">Paint the level on the board or paste it as text.</p>
+    <p class="solve-only">The shortest path from the player's atom to the exit, step by step.</p>
+    <p class="try-only">Draw a path from your atom to the exit. Every atom has to end with no free electrons.</p>
   </header>
 
   <main class="layout">
     <section class="stage">
-      <div class="tools" id="tools" role="toolbar" aria-label="Level editor tools"></div>
+      <div class="tools edit-only" id="tools" role="toolbar" aria-label="Level editor tools"></div>
       <div class="board-wrap"><svg id="board" aria-label="Level board"></svg></div>
-      <p class="hint" id="hint">Click or drag on the board to paint with the selected tool.</p>
-      <div class="panel" id="result-panel" hidden>
+      <p class="hint edit-only" id="hint">Click or drag on the board to paint with the selected tool.</p>
+      <div class="panel try-only" id="trypanel">
+        <div class="status" id="trymsg" role="status"></div>
+        <div class="tryrow">
+          <div class="dpad" aria-label="Move">
+            <button class="btn" data-dir="U" style="grid-area:u" aria-label="Up">↑</button>
+            <button class="btn" data-dir="L" style="grid-area:l" aria-label="Left">←</button>
+            <button class="btn" data-dir="D" style="grid-area:d" aria-label="Down">↓</button>
+            <button class="btn" data-dir="R" style="grid-area:r" aria-label="Right">→</button>
+          </div>
+          <div class="trystats">
+            <span class="steplabel" id="trycount">0 moves</span>
+            <div class="solution" id="trypath"></div>
+            <div class="row">
+              <button class="btn" id="undo">Undo</button>
+              <button class="btn" id="restart">Restart</button>
+            </div>
+            <p class="hint">Drag from your atom or use the arrow keys (or WASD). Step back onto the path or press Z to undo, R restarts, Esc returns to Edit.</p>
+          </div>
+        </div>
+      </div>
+      <div class="panel solve-only" id="result-panel" hidden>
         <div class="playback">
           <button class="btn" id="first" title="First step (Home)">⏮</button>
           <button class="btn" id="prev" title="Previous step (←)">◀</button>
@@ -156,7 +209,7 @@ details dd { margin: 0; color: var(--muted); }
     </section>
 
     <aside class="side">
-      <div class="panel">
+      <div class="panel edit-only">
         <h2>Level</h2>
         <div class="row">
           <label class="field" for="sample">Load
@@ -185,23 +238,23 @@ details dd { margin: 0; color: var(--muted); }
             <dt># or space</dt><dd>outside the level</dd>
             <dt>H O N C</dt><dd>loose atoms with 1–4 electrons</dd>
             <dt>h o n c</dt><dd>the player's atom</dd>
-            <dt>start=R</dt><dd>first move must go right (U D L R)</dd>
+            <dt>start=R</dt><dd>the start leads right (U D L R); that first step is taken automatically</dd>
             <dt>exit=D</dt><dd>last move must go down into the exit</dd>
             <dt>valence: X=2</dt><dd>add a new element</dd>
           </dl>
         </details>
+        <div class="status err" id="editmsg" role="status" hidden></div>
       </div>
 
-      <div class="panel">
+      <div class="panel solve-only">
         <h2>Solve</h2>
         <div class="row">
           <label class="field" for="maxLen">Max moves (0 = none) <input type="number" id="maxLen" min="0" value="0"></label>
           <label class="field" for="limit">State limit <input type="number" id="limit" min="10000" step="100000" value="3000000" style="width:110px"></label>
         </div>
         <div class="row">
-          <button class="btn primary" id="solve">Solve</button>
+          <button class="btn primary" id="solve">Solve again</button>
           <button class="btn" id="cancel" hidden>Stop</button>
-          <button class="btn" id="edit" hidden>Back to editing</button>
         </div>
         <div class="status" id="status">Ready.</div>
       </div>
@@ -209,24 +262,15 @@ details dd { margin: 0; color: var(--muted); }
   </main>
 </div>
 
-<script type="text/plain" id="worker-src">
+<!-- The game rules and solver. Runs on the page (try mode) and as the solver's worker. -->
+<script id="engine-src">
 "use strict";
+const Engine = (() => {
 const STRIDE = 1024;
 const OFF = { U: -STRIDE, D: STRIDE, L: -1, R: 1 };
 const DK = ["U", "D", "L", "R"];
 
-self.onmessage = (e) => {
-  const t0 = performance.now();
-  try {
-    const res = solve(e.data);
-    res.ms = Math.round(performance.now() - t0);
-    self.postMessage(res);
-  } catch (err) {
-    self.postMessage({ type: "error", message: String(err && err.message || err) });
-  }
-};
-
-function solve(L) {
+function makeEngine(L) {
   const n = L.pos.length;
   const E = L.exit;
   const tileBit = new Map();
@@ -289,6 +333,38 @@ function solve(L) {
     return !need(s) === !looseFree(s);
   }
 
+  const origin = L.pos[0];
+  let start = bond(L.pos.slice(), 1, [], L.valence.slice());
+  let visited0 = tileBit.get(origin);
+  // The path can't pass over tiles where atoms start.
+  for (let i = 1; i < n; i++) { const b = tileBit.get(L.pos[i]); if (b !== undefined) visited0 |= b; }
+
+  // A start with a fixed direction forces the first step, so it is taken up
+  // front: the tile it leads to becomes part of the path and play begins there.
+  let startError = "";
+  if (startDir) {
+    const lead = origin + OFF[startDir];
+    const b = tileBit.get(lead);
+    const next = b !== undefined && !(visited0 & b) && (lead !== E || !exitDir || exitDir === startDir)
+      ? step(start, OFF[startDir]) : null;
+    if (next) { start = next; visited0 |= b; }
+    else startError = "The start's first step is blocked, so the level can't be played.";
+  }
+
+  // A finished path: on the exit, every atom neutral, the molecule inside the level.
+  function isWin(s) {
+    if (s.pos[0] !== E || need(s) || looseFree(s)) return false;
+    for (let i = 0; i < n; i++) if ((s.mol >> i & 1) && !tiles.has(s.pos[i])) return false;
+    return true;
+  }
+
+  return { n, E, tiles, tileBit, exitDir, need, looseFree, step, canFinish, isWin, origin, start, visited0, startError };
+}
+
+function solve(L) {
+  const { n, E, tiles, tileBit, exitDir, need, looseFree, step, canFinish, start, visited0, startError } = makeEngine(L);
+  if (startError) return { type: "blocked", message: startError };
+
   // Can the path still reach the exit (from the right side) through unused tiles?
   function exitReachable(lead, visited) {
     let seen = visited | tileBit.get(lead);
@@ -309,7 +385,7 @@ function solve(L) {
   }
 
   // Shortest route to the exit once the molecule can no longer bond (its shape is fixed).
-  function finish(s, visited, pathLen) {
+  function finish(s, visited) {
     const lead = s.pos[0];
     const shape = [], blocked = new Set();
     for (let i = 0; i < n; i++) {
@@ -329,7 +405,6 @@ function solve(L) {
         return out.reverse().join("");
       }
       for (const d of DK) {
-        if (p === lead && pathLen === 0 && startDir && d !== startDir) continue;
         const q = p + OFF[d];
         const b = tileBit.get(q);
         if (b === undefined || (visited & b) || prev.has(q) || !fits(q)) continue;
@@ -340,11 +415,6 @@ function solve(L) {
     }
     return null;
   }
-
-  const start = bond(L.pos.slice(), 1, [], L.valence.slice());
-  let visited0 = tileBit.get(start.pos[0]);
-  // The path can't pass over tiles where atoms start.
-  for (let i = 1; i < n; i++) { const b = tileBit.get(L.pos[i]); if (b !== undefined) visited0 |= b; }
 
   const seen = new Map([[start.key, [visited0]]]);
   const queue = [[start, visited0, ""]];
@@ -360,13 +430,12 @@ function solve(L) {
     if (best !== null && path.length >= best.length) break;
     if (!need(s)) {
       if (looseFree(s)) continue;
-      const rest = finish(s, v, path.length);
+      const rest = finish(s, v);
       if (rest !== null && (best === null || path.length + rest.length < best.length)) best = path + rest;
       continue;
     }
     if (s.pos[0] === E || (L.maxLen && path.length >= L.maxLen)) continue;
     for (const d of DK) {
-      if (path.length === 0 && startDir && d !== startDir) continue;
       const lead = s.pos[0] + OFF[d];
       const b = tileBit.get(lead);
       if (b === undefined || (v & b)) continue;
@@ -391,6 +460,22 @@ function solve(L) {
   return {
     type: "done", path: best, nodes,
     frames: frames.map((f) => ({ pos: f.pos, mol: f.mol, bonds: f.bonds, free: f.free })),
+  };
+}
+
+return { OFF, DK, makeEngine, solve };
+})();
+
+if (typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope) {
+  self.onmessage = (e) => {
+    const t0 = performance.now();
+    try {
+      const res = Engine.solve(e.data);
+      res.ms = Math.round(performance.now() - t0);
+      self.postMessage(res);
+    } catch (err) {
+      self.postMessage({ type: "error", message: String(err && err.message || err) });
+    }
   };
 }
 </script>
@@ -429,6 +514,9 @@ const TOOLS = [
 let M = null;           // level model being edited
 let tool = "floor";
 let lastEl = "O";
+let mode = "edit";      // "edit" | "solve" | "try"
+let solveDone = false;  // the solver has run (or is running) on the current level
+let game = null;        // try mode: the player's own attempt
 let sol = null;         // solved result for playback
 let cur = 0;
 let playTimer = null;
@@ -532,11 +620,18 @@ function tri(cx, cy, dir, size) {
   return `${tip[0]},${tip[1]} ${b1[0]},${b1[1]} ${b2[0]},${b2[1]}`;
 }
 
-function currentAtoms() {
-  if (sol) {
-    const f = sol.frames[cur];
+// What the board shows: the try-mode game, a solution being played back, or (null) the editor.
+function scene() {
+  if (mode === "try" && game) return { frames: game.states, cur: game.states.length - 1, elems: game.L.elems, bounds: game.bounds, origin: game.G.origin, ghost: false };
+  if (mode === "solve" && sol) return { frames: sol.frames, cur, elems: sol.elems, bounds: sol.bounds, origin: sol.origin, ghost: true };
+  return null;
+}
+
+function currentAtoms(sc) {
+  if (sc) {
+    const f = sc.frames[sc.cur];
     return {
-      atoms: f.pos.map((p, i) => { const [r, c] = dec(p); return { r, c, el: sol.elems[i], mol: !!(f.mol >> i & 1), free: f.free[i], player: i === 0 }; }),
+      atoms: f.pos.map((p, i) => { const [r, c] = dec(p); return { r, c, el: sc.elems[i], mol: !!(f.mol >> i & 1), free: f.free[i], player: i === 0 }; }),
       bonds: f.bonds,
     };
   }
@@ -549,13 +644,13 @@ function currentAtoms() {
 
 function draw() {
   const svg = $("board");
+  const sc = scene();
+  svg.classList.toggle("won", mode === "try" && !!game && game.won);
   let r0 = 0, c0 = 0, r1 = M.h - 1, c1 = M.w - 1;
-  if (sol) ({ r0, c0, r1, c1 } = sol.bounds);
+  if (sc) ({ r0, c0, r1, c1 } = sc.bounds);
   const pad = 8;
   const vx = c0 * S - pad, vy = r0 * S - pad, vw = (c1 - c0 + 1) * S + pad * 2, vh = (r1 - r0 + 1) * S + pad * 2;
   svg.setAttribute("viewBox", `${vx} ${vy} ${vw} ${vh}`);
-  svg.setAttribute("width", vw);
-  svg.setAttribute("height", vh);
   const out = [];
   out.push(`<rect x="${vx}" y="${vy}" width="${vw}" height="${vh}" fill="transparent"/>`);
 
@@ -567,11 +662,11 @@ function draw() {
     const x = M.cells[r * M.w + c];
     const X = c * S, Y = r * S;
     if (x.t === "void") {
-      if (!sol) out.push(`<rect x="${X + 5}" y="${Y + 5}" width="${S - 10}" height="${S - 10}" rx="7" fill="none" stroke="var(--void)" stroke-dasharray="3 4"/>`);
+      if (mode === "edit") out.push(`<rect x="${X + 5}" y="${Y + 5}" width="${S - 10}" height="${S - 10}" rx="7" fill="none" stroke="var(--void)" stroke-dasharray="3 4"/>`);
       continue;
     }
     out.push(`<rect x="${X + 2}" y="${Y + 2}" width="${S - 4}" height="${S - 4}" rx="9" fill="var(--tile)" stroke="var(--tile-edge)"/>`);
-    if (!sol && x.atom && !x.atom.player) {
+    if (x.atom && !x.atom.player) {
       out.push(`<path d="M${X + 9} ${Y + 9} l6 0 M${X + 9} ${Y + 9} l0 6" stroke="var(--tile-edge)" stroke-width="2" fill="none"/>`);
     }
   }
@@ -599,14 +694,38 @@ function draw() {
   });
 
   // path
-  if (sol) {
-    const pt = (f) => { const [r, c] = dec(f.pos[0]); return `${c * S + S / 2},${r * S + S / 2}`; };
-    out.push(`<polyline points="${sol.frames.map(pt).join(" ")}" fill="none" stroke="var(--accent)" stroke-opacity="0.35" stroke-width="3" stroke-dasharray="2 6" stroke-linecap="round" stroke-linejoin="round"/>`);
-    if (cur > 0) out.push(`<polyline points="${sol.frames.slice(0, cur + 1).map(pt).join(" ")}" fill="none" stroke="var(--accent)" stroke-opacity="0.8" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>`);
+  if (sc) {
+    // The path runs from the start tile, through the automatic first step if there is one.
+    const leads = sc.frames.map((f) => f.pos[0]);
+    if (sc.origin !== leads[0]) leads.unshift(sc.origin);
+    const shown = leads.length - (sc.frames.length - 1 - sc.cur);
+    const pt = (p) => { const [r, c] = dec(p); return `${c * S + S / 2},${r * S + S / 2}`; };
+    if (sc.ghost) out.push(`<polyline points="${leads.map(pt).join(" ")}" fill="none" stroke="var(--accent)" stroke-opacity="0.35" stroke-width="3" stroke-dasharray="2 6" stroke-linecap="round" stroke-linejoin="round"/>`);
+    if (shown > 1) out.push(`<polyline points="${leads.slice(0, shown).map(pt).join(" ")}" fill="none" stroke="var(--accent)" stroke-opacity="0.8" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>`);
+  }
+
+  // try mode: mark the tiles the path can go to next
+  if (mode === "try" && game && !game.over) {
+    for (const d of Engine.DK) {
+      const m = checkMove(d);
+      if (!m.next) continue;
+      const [r, c] = dec(m.lead);
+      out.push(`<circle cx="${c * S + S / 2}" cy="${r * S + S / 2}" r="7" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-opacity="0.7"/>`);
+    }
   }
 
   // bonds and atoms
-  const { atoms, bonds } = currentAtoms();
+  const { atoms, bonds } = currentAtoms(sc);
+  const R = S * 0.3;
+  // try mode: a grey ghost stays on the tile where each moved atom started
+  if (mode === "try" && game) {
+    game.L.pos.forEach((p, i) => {
+      if (atoms[i] && enc(atoms[i].r, atoms[i].c) === p) return;
+      const [r, c] = dec(p), cx = c * S + S / 2, cy = r * S + S / 2, el = game.L.elems[i];
+      out.push(`<circle cx="${cx}" cy="${cy}" r="${R}" fill="var(--used)"/>`);
+      out.push(`<text x="${cx}" y="${cy + 5.5}" text-anchor="middle" font-family="Lexend, system-ui, sans-serif" font-weight="700" font-size="16" fill="var(--used-ink)">${i === 0 ? el.toLowerCase() : el}</text>`);
+    });
+  }
   const count = new Map();
   for (const [i, j] of bonds) { const k = i + "," + j; count.set(k, (count.get(k) || 0) + 1); }
   for (const [k, m] of count) {
@@ -619,10 +738,9 @@ function draw() {
       out.push(`<line x1="${ax + nx * o}" y1="${ay + ny * o}" x2="${bx + nx * o}" y2="${by + ny * o}" stroke="var(--ink)" stroke-width="5" stroke-linecap="round"/>`);
     }
   }
-  const R = S * 0.3;
   for (const a of atoms) {
     const cx = a.c * S + S / 2, cy = a.r * S + S / 2;
-    const offLevel = sol && !isTile(a.r, a.c);
+    const offLevel = sc && !isTile(a.r, a.c);
     out.push(`<g${offLevel ? ' opacity="0.55"' : ""}>`);
     out.push(`<circle cx="${cx}" cy="${cy}" r="${R}" fill="${colorOf(a.el)}"${a.mol ? ' stroke="var(--ink)" stroke-width="3"' : ""}/>`);
     out.push(`<text x="${cx}" y="${cy + 5.5}" text-anchor="middle" font-family="Lexend, system-ui, sans-serif" font-weight="700" font-size="16" fill="var(--atom-text)">${a.player ? a.el.toLowerCase() : a.el}</text>`);
@@ -664,8 +782,18 @@ function applyTool(r, c) {
   return JSON.stringify(x) !== before;
 }
 
+function setEditMsg(msg) {
+  $("editmsg").textContent = msg;
+  $("editmsg").hidden = !msg;
+}
+
 function modelChanged({ fromText = false } = {}) {
+  // A new level: any running search, solution or attempt belongs to the old one.
+  finishWorker();
   clearSolution();
+  solveDone = false;
+  game = null;
+  try { buildLevel(); setEditMsg(""); } catch (e) { setEditMsg(e.message); }
   if (!fromText) $("text").value = serialize(M);
   $("w").value = M.w; $("h").value = M.h;
   $("startDir").value = M.startDir; $("exitDir").value = M.exitDir;
@@ -702,17 +830,16 @@ function clearSolution() {
   if (!sol) return;
   sol = null; cur = 0;
   $("result-panel").hidden = true;
-  $("edit").hidden = true;
-  $("hint").hidden = false;
-  setStatus("Level changed. Press Solve to search again.");
+  setStatus("Ready.");
 }
 
 function runSolve() {
   let L;
-  try { L = buildLevel(); } catch (e) { setStatus(e.message, "err"); return; }
+  solveDone = true;
+  try { L = buildLevel(); } catch (e) { setStatus(e.message + " Fix the level in Edit mode.", "err"); return; }
   clearSolution();
   if (worker) worker.terminate();
-  const url = URL.createObjectURL(new Blob([$("worker-src").textContent], { type: "text/javascript" }));
+  const url = URL.createObjectURL(new Blob([$("engine-src").textContent], { type: "text/javascript" }));
   worker = new Worker(url);
   URL.revokeObjectURL(url);
   $("solve").disabled = true; $("cancel").hidden = false;
@@ -726,6 +853,7 @@ function runSolve() {
     finishWorker();
     const secs = ((data.ms ?? performance.now() - t0) / 1000).toFixed(2);
     if (data.type === "done") showSolution(L, data, secs);
+    else if (data.type === "blocked") setStatus(data.message + " Fix the level in Edit mode.", "err");
     else if (data.type === "none") setStatus(`No solution. Searched ${data.nodes.toLocaleString()} states in ${secs}s.${L.maxLen ? " Try raising Max moves." : ""}`, "err");
     else if (data.type === "limit") setStatus(`Stopped after ${data.nodes.toLocaleString()} states (paths up to ${data.depth} moves) without a solution. Raise the state limit to search further.`, "err");
     else setStatus("Solver error: " + data.message, "err");
@@ -746,15 +874,13 @@ function showSolution(L, data, secs) {
     const [r, c] = dec(p);
     r0 = Math.min(r0, r); c0 = Math.min(c0, c); r1 = Math.max(r1, r); c1 = Math.max(c1, c);
   }
-  sol = { path: data.path, frames: data.frames, elems: L.elems, bounds: { r0, c0, r1, c1 } };
+  sol = { path: data.path, frames: data.frames, elems: L.elems, origin: L.pos[0], bounds: { r0, c0, r1, c1 } };
   cur = 0;
   const arrows = [...data.path].map((d) => ARROW[d]).join("");
   setStatus(`<b>Solved in ${data.path.length} moves</b> (${data.nodes.toLocaleString()} states, ${secs}s)<div class="solution">${data.path}<br>${arrows}</div>`, "ok");
   $("moves").innerHTML = [...data.path].map((d, i) => `<button class="move" data-i="${i + 1}" title="Move ${i + 1}: ${d}"><small>${i + 1}</small>${ARROW[d]}</button>`).join("");
   $("scrub").max = data.path.length;
   $("result-panel").hidden = false;
-  $("edit").hidden = false;
-  $("hint").hidden = true;
   go(0);
 }
 
@@ -786,6 +912,142 @@ function togglePlay() {
   }, 420);
 }
 
+/* ---------- try mode ---------- */
+const DIRNAME = { U: "up", D: "down", L: "left", R: "right" };
+
+function startGame() {
+  let L, G;
+  try {
+    L = buildLevel();
+    G = Engine.makeEngine(L);
+    if (G.startError) throw new Error(G.startError);
+  } catch (e) {
+    game = null;
+    tryMessage(e.message + " Fix the level in Edit mode.", "err");
+    $("undo").disabled = $("restart").disabled = true;
+    $("trycount").textContent = "";
+    $("trypath").textContent = "";
+    return;
+  }
+  game = { L, G, stack: [{ s: G.start, v: G.visited0 }], path: "", states: [G.start], bounds: null, over: false, won: false };
+  afterTryChange();
+}
+
+// Where the path would go in direction d, and the resulting state if the move is legal.
+function checkMove(d) {
+  const { G, L, stack } = game;
+  const { s, v } = stack[stack.length - 1];
+  const lead = s.pos[0] + Engine.OFF[d];
+  if (s.pos[0] === G.E) return { lead, reason: "The path has reached the exit. Undo to change it." };
+  const b = G.tileBit.get(lead);
+  if (b === undefined) return { lead, reason: "The path has to stay on level tiles." };
+  if (v & b) {
+    if (lead === L.pos[0]) return { lead, reason: "The path can't go back over the start." };
+    if (L.pos.includes(lead)) return { lead, reason: "The path can't cross a tile where an atom started." };
+    return { lead, reason: "The path can't cross itself." };
+  }
+  if (lead === G.E && L.exitDir && d !== L.exitDir) return { lead, reason: `The exit has to be entered going ${DIRNAME[L.exitDir]}.` };
+  const next = G.step(s, Engine.OFF[d]);
+  if (!next) return { lead, reason: "An atom is in the way." };
+  return { lead, next, nv: v | b };
+}
+
+function tryMove(d) {
+  if (!game) return;
+  const { stack } = game;
+  // Stepping back onto the previous tile erases the last step, like redrawing the path.
+  if (stack.length > 1 && stack[stack.length - 1].s.pos[0] + Engine.OFF[d] === stack[stack.length - 2].s.pos[0]) {
+    tryUndo();
+    return;
+  }
+  const m = checkMove(d);
+  if (!m.next) { tryMessage(m.reason, "err"); return; }
+  stack.push({ s: m.next, v: m.nv });
+  game.path += d;
+  afterTryChange();
+}
+
+function tryUndo() {
+  if (!game || game.stack.length < 2) return;
+  game.stack.pop();
+  game.path = game.path.slice(0, -1);
+  afterTryChange();
+}
+
+function tryRestart() {
+  if (!game) return;
+  game.stack.length = 1;
+  game.path = "";
+  afterTryChange();
+}
+
+function tryMessage(html, kind = "") {
+  const el = $("trymsg");
+  el.className = "status" + (kind ? " " + kind : "");
+  el.innerHTML = html;
+}
+
+function afterTryChange() {
+  const { G, stack, path } = game;
+  const s = stack[stack.length - 1].s;
+  game.states = stack.map((x) => x.s);
+  // Two cells of room around the level for atoms hanging off the edge. The view
+  // only grows, so the board doesn't jump if a molecule reaches further.
+  const b = game.bounds || { r0: -2, c0: -2, r1: M.h + 1, c1: M.w + 1 };
+  for (const p of s.pos) {
+    const [r, c] = dec(p);
+    b.r0 = Math.min(b.r0, r); b.c0 = Math.min(b.c0, c); b.r1 = Math.max(b.r1, r); b.c1 = Math.max(b.c1, c);
+  }
+  game.bounds = b;
+  game.over = s.pos[0] === G.E;
+  const free = G.need(s) + G.looseFree(s);
+  const won = game.won = game.over && G.isWin(s);
+  $("trycount").textContent = `${path.length} move${path.length === 1 ? "" : "s"}`;
+  $("trypath").textContent = [...path].map((d) => ARROW[d]).join("");
+  $("undo").disabled = stack.length < 2;
+  $("restart").disabled = stack.length < 2;
+
+  if (won) {
+    let extra = "";
+    if (sol) extra = sol.path.length < path.length ? ` The shortest solution takes ${sol.path.length}.` : " That's the shortest possible.";
+    tryMessage(`<b>Solved in ${path.length} moves!</b>${extra}`, "win");
+  } else if (game.over) {
+    tryMessage(free
+      ? `You reached the exit with ${free} free electron${free === 1 ? "" : "s"} left. Undo and try another route.`
+      : "Part of the molecule is outside the level. Undo and try another route.", "err");
+  } else if (!G.canFinish(s)) {
+    tryMessage(G.need(s)
+      ? "No loose atom has a free electron left to bond with. Undo or restart."
+      : "Your molecule is full, but some loose atoms still have free electrons. Undo or restart.", "err");
+  } else {
+    tryMessage(path.length
+      ? `${free} free electron${free === 1 ? "" : "s"} left on the board.`
+      : `Draw a path to the exit. ${free} free electrons to use up.`);
+  }
+  draw();
+}
+
+// Try mode on the board: dragging or clicking into a tile next to the atom moves it there.
+function tryPointer(e) {
+  const [r, c] = cellAt(e);
+  const s = game.stack[game.stack.length - 1].s;
+  const [lr, lc] = dec(s.pos[0]);
+  for (const d of Engine.DK) {
+    if (lr + DIRV[d][0] === r && lc + DIRV[d][1] === c) { tryMove(d); return; }
+  }
+}
+
+/* ---------- modes ---------- */
+function setMode(m) {
+  mode = m;
+  document.body.dataset.mode = m;
+  document.querySelectorAll(".modes [data-mode]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.mode === m));
+  stopPlay();
+  if (m === "solve" && !solveDone) runSolve();
+  if (m === "try" && !game) startGame();
+  draw();
+}
+
 /* ---------- wiring ---------- */
 function buildToolbar() {
   $("tools").innerHTML = TOOLS.map((t) => {
@@ -806,8 +1068,7 @@ function loadText(text) {
     M = parseLevel(text);
     $("text").value = text;
     modelChanged({ fromText: true });
-    setStatus("Ready.");
-  } catch (e) { setStatus(e.message, "err"); }
+  } catch (e) { setEditMsg(e.message); }
 }
 
 function init() {
@@ -831,8 +1092,7 @@ function init() {
       try {
         M = parseLevel($("text").value);
         modelChanged({ fromText: true });
-        setStatus("Ready.");
-      } catch (e) { setStatus(e.message, "err"); }
+      } catch (e) { setEditMsg(e.message); }
     }, 250);
   });
   $("w").addEventListener("change", () => resize(+$("w").value, M.h));
@@ -843,14 +1103,17 @@ function init() {
   const board = $("board");
   let painting = false;
   board.addEventListener("pointerdown", (e) => {
-    if (sol) return;
+    if (mode === "solve" || (mode === "try" && !game)) return;
     painting = true;
     board.setPointerCapture(e.pointerId);
+    if (mode === "try") { tryPointer(e); return; }
     const [r, c] = cellAt(e);
     if (applyTool(r, c)) modelChanged();
   });
   board.addEventListener("pointermove", (e) => {
-    if (!painting || sol || !["floor", "void", "erase"].includes(tool)) return;
+    if (!painting) return;
+    if (mode === "try") { tryPointer(e); return; }
+    if (!["floor", "void", "erase"].includes(tool)) return;
     const [r, c] = cellAt(e);
     if (applyTool(r, c)) modelChanged();
   });
@@ -860,7 +1123,6 @@ function init() {
 
   $("solve").addEventListener("click", runSolve);
   $("cancel").addEventListener("click", () => { finishWorker(); setStatus("Search stopped."); });
-  $("edit").addEventListener("click", () => { clearSolution(); setStatus("Ready."); draw(); });
   $("first").addEventListener("click", () => { stopPlay(); go(0); });
   $("prev").addEventListener("click", () => { stopPlay(); go(cur - 1); });
   $("next").addEventListener("click", () => { stopPlay(); go(cur + 1); });
@@ -870,8 +1132,30 @@ function init() {
     const b = e.target.closest(".move");
     if (b) { stopPlay(); go(+b.dataset.i); }
   });
+  document.querySelector(".modes").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-mode]");
+    if (b) setMode(b.dataset.mode);
+  });
+  $("undo").addEventListener("click", tryUndo);
+  $("restart").addEventListener("click", tryRestart);
+  document.querySelector(".dpad").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-dir]");
+    if (b) tryMove(b.dataset.dir);
+  });
+  const KEYDIR = { ArrowUp: "U", ArrowDown: "D", ArrowLeft: "L", ArrowRight: "R", w: "U", s: "D", a: "L", d: "R" };
   document.addEventListener("keydown", (e) => {
-    if (!sol || e.target.closest("input, textarea, select")) return;
+    if (e.target.closest("input, textarea, select") || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (mode === "try") {
+      const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      if (KEYDIR[k]) tryMove(KEYDIR[k]);
+      else if (k === "z" || k === "Backspace") tryUndo();
+      else if (k === "r") tryRestart();
+      else if (k === "Escape") setMode("edit");
+      else return;
+      e.preventDefault();
+      return;
+    }
+    if (mode !== "solve" || !sol) return;
     if (e.key === "ArrowRight") { stopPlay(); go(cur + 1); e.preventDefault(); }
     else if (e.key === "ArrowLeft") { stopPlay(); go(cur - 1); e.preventDefault(); }
     else if (e.key === "Home") { stopPlay(); go(0); e.preventDefault(); }
@@ -884,7 +1168,7 @@ function init() {
   if (saved) { try { M = parseLevel(saved); $("text").value = saved; ok = true; } catch (e) {} }
   if (!ok) { M = parseLevel(SAMPLES[1].text); $("text").value = SAMPLES[1].text; }
   modelChanged({ fromText: true });
-  setStatus("Ready. Press Solve to find the shortest path.");
+  setMode("edit");
 }
 init();
 </script>

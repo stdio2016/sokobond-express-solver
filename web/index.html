@@ -106,9 +106,11 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 .swatch { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
 .sq { width: 14px; height: 14px; border-radius: 3px; display: inline-block; background: var(--tile); border: 1px solid var(--tile-edge); }
 .sq.void { background: transparent; border: 1px dashed var(--void); }
-.board-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; aspect-ratio: 4 / 3; max-width: 100%; }
-/* The board keeps one shape; the level scales to fit inside it. */
-#board { display: block; width: 100%; height: 100%; touch-action: none; user-select: none; }
+.board-wrap { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); aspect-ratio: 1 / 1; max-width: 100%; }
+/* The board keeps one shape; the level scales to fit inside it. The SVG is
+   positioned absolutely because Safari doesn't resolve height: 100% inside an
+   aspect-ratio box, which let it spill over the bottom padding. */
+#board { position: absolute; top: 12px; left: 12px; width: calc(100% - 24px); height: calc(100% - 24px); display: block; touch-action: none; user-select: none; }
 .hint { color: var(--muted); font-size: 12.5px; margin: 0; }
 .playback { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .playback input[type=range] { flex: 1 1 160px; accent-color: var(--accent); }
@@ -991,9 +993,9 @@ function afterTryChange() {
   const { G, stack, path } = game;
   const s = stack[stack.length - 1].s;
   game.states = stack.map((x) => x.s);
-  // Two cells of room around the level for atoms hanging off the edge. The view
+  // One cell of room around the level for atoms hanging off the edge. The view
   // only grows, so the board doesn't jump if a molecule reaches further.
-  const b = game.bounds || { r0: -2, c0: -2, r1: M.h + 1, c1: M.w + 1 };
+  const b = game.bounds || { r0: -1, c0: -1, r1: M.h, c1: M.w };
   for (const p of s.pos) {
     const [r, c] = dec(p);
     b.r0 = Math.min(b.r0, r); b.c0 = Math.min(b.c0, c); b.r1 = Math.max(b.r1, r); b.c1 = Math.max(b.c1, c);

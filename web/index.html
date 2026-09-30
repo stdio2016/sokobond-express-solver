@@ -25,6 +25,7 @@
   --x: #7c62c9;
   --atom-text: #ffffff;
   --used: #b3bdc7;
+  --electron: #b8338f;
   --used-ink: #f5f7f9;
   --radius: 10px;
   --font: "Lexend", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -51,6 +52,7 @@
     --c: #d9a02a;
     --x: #9a83e3;
   --used: #3b4652;
+  --electron: #e065bd;
   --used-ink: #8e9aa6;
   }
 }
@@ -74,6 +76,7 @@
   --c: #d9a02a;
   --x: #9a83e3;
   --used: #3b4652;
+  --electron: #e065bd;
   --used-ink: #8e9aa6;
 }
 * { box-sizing: border-box; }
@@ -242,6 +245,10 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
             <dt>h o n c</dt><dd>the player's atom</dd>
             <dt>start=R</dt><dd>the start leads right (U D L R); that first step is taken automatically</dd>
             <dt>exit=D</dt><dd>last move must go down into the exit</dd>
+            <dt>-</dt><dd>one electron on a tile</dd>
+            <dt>[O+] [n++]</dt><dd>an ion: one + per charge (one less free electron each)</dd>
+            <dt>[--]</dt><dd>several electrons in one cell</dd>
+            <dt>[H#] [-#]</dt><dd># inside brackets: starts on a hole, not a tile</dd>
             <dt>valence: X=2</dt><dd>add a new element</dd>
           </dl>
         </details>
@@ -279,17 +286,30 @@ function makeEngine(L) {
   L.tiles.forEach((p, k) => tileBit.set(p, 1n << BigInt(k)));
   const tiles = new Set(L.tiles);
   const { startDir, exitDir } = L;
+  // Electron cells: code -> index into a state's electron counts.
+  const ecell = new Map();
+  L.electrons.forEach((e, k) => ecell.set(e.p, k));
 
-  const need = (s) => { let t = 0; for (let i = 0; i < n; i++) if (s.mol >> i & 1) t += s.free[i]; return t; };
-  const mk = (pos, mol, bonds, free) => ({ pos, mol, bonds, free, key: pos.join(",") + "|" + mol + "|" + free.join(",") });
+  const sumMol = (s, arr, inMol) => { let t = 0; for (let i = 0; i < n; i++) if (!!(s.mol >> i & 1) === inMol) t += arr[i]; return t; };
+  const need = (s) => sumMol(s, s.free, true);          // free electrons on the molecule
+  const looseFree = (s) => sumMol(s, s.free, false);    // free electrons on loose atoms
+  const molCharge = (s) => sumMol(s, s.charge, true);
+  const looseCharge = (s) => sumMol(s, s.charge, false);
+  const electronsLeft = (s) => s.elec.reduce((a, b) => a + b, 0);
+  const mk = (pos, mol, bonds, free, charge, elec) => ({
+    pos, mol, bonds, free, charge, elec,
+    key: pos.join(",") + "|" + mol + "|" + free.join(",") + "|" + charge.join(",") + "|" + elec.join(","),
+  });
 
-  function bond(pos, mol, bonds, free) {
-    let open = false;
-    for (let i = 0; i < n; i++) if ((mol >> i & 1) && free[i]) open = true;
-    if (!open) return mk(pos, mol, bonds, free);
-    free = free.slice(); bonds = bonds.slice();
+  // After a step: molecule ions capture electrons from neighbouring cells (one
+  // per cell they touch), and molecule atoms bond with neighbours, until
+  // nothing changes.
+  function resolve(pos, mol, bonds, free, charge, elec) {
+    free = free.slice(); charge = charge.slice(); elec = elec.slice();
+    let bondsCopied = false;
     const at = new Map();
     pos.forEach((p, i) => at.set(p, i));
+    const touched = new Set();
     let changed = true;
     while (changed) {
       changed = false;
@@ -298,9 +318,20 @@ function makeEngine(L) {
       order.sort((a, b) => pos[a] - pos[b]);
       for (const i of order) {
         for (const d of DK) {
+          if (!charge[i]) break;
+          const k = ecell.get(pos[i] + OFF[d]);
+          if (k === undefined || !elec[k] || touched.has(i * 4096 + k)) continue;
+          touched.add(i * 4096 + k);
+          elec[k]--; charge[i]--; free[i]++;
+          changed = true;
+        }
+      }
+      for (const i of order) {
+        for (const d of DK) {
           if (!free[i]) break;
           const j = at.get(pos[i] + OFF[d]);
           if (j === undefined || (mol >> j & 1) || !free[j]) continue;
+          if (!bondsCopied) { bonds = bonds.slice(); bondsCopied = true; }
           // Neighbours with several free electrons form as many bonds as they can.
           const k = Math.min(free[i], free[j]);
           for (let b = 0; b < k; b++) bonds.push([Math.min(i, j), Math.max(i, j)]);
@@ -310,36 +341,45 @@ function makeEngine(L) {
         }
       }
     }
-    return mk(pos, mol, bonds, free);
+    return mk(pos, mol, bonds, free, charge, elec);
+  }
+
+  // Cells the molecule can't move into: loose atoms and cells holding electrons.
+  function blockedCells(s) {
+    const occ = new Set();
+    for (let i = 0; i < n; i++) if (!(s.mol >> i & 1)) occ.add(s.pos[i]);
+    L.electrons.forEach((e, k) => { if (s.elec[k]) occ.add(e.p); });
+    return occ;
   }
 
   function step(s, off) {
-    const occ = new Set();
-    for (let i = 0; i < n; i++) if (!(s.mol >> i & 1)) occ.add(s.pos[i]);
+    const occ = blockedCells(s);
     const pos = s.pos.slice();
     for (let i = 0; i < n; i++) {
       if (!(s.mol >> i & 1)) continue;
       pos[i] += off;
       if (occ.has(pos[i])) return null;
     }
-    return bond(pos, s.mol, s.bonds, s.free);
+    return resolve(pos, s.mol, s.bonds, s.free, s.charge, s.elec);
   }
 
-  // Free electrons on atoms outside the molecule.
-  const looseFree = (s) => { let t = 0; for (let i = 0; i < n; i++) if (!(s.mol >> i & 1)) t += s.free[i]; return t; };
-
-  // Every atom must end neutral. Only the molecule can bond, so a molecule with
-  // no free electrons left strands any loose atom that still has some, and a
-  // molecule that still needs electrons needs a loose atom to supply them.
+  // Can every atom still end neutral with no free electrons? Only molecule
+  // atoms bond or capture, and a loose atom only joins by bonding.
   function canFinish(s) {
-    return !need(s) === !looseFree(s);
+    for (let i = 0; i < n; i++) if (!(s.mol >> i & 1) && !s.free[i] && s.charge[i]) return false; // can never join
+    if (molCharge(s) + looseCharge(s) > electronsLeft(s)) return false;
+    const lf = looseFree(s), potential = need(s) + molCharge(s);
+    if (lf && !potential) return false;   // nothing left on the molecule to bond with them
+    if (!lf && potential) return false;   // nothing left to bond with the molecule
+    return true;
   }
 
   const origin = L.pos[0];
-  let start = bond(L.pos.slice(), 1, [], L.valence.slice());
+  let start = resolve(L.pos.slice(), 1, [], L.pos.map((_, i) => L.valence[i] - L.charge[i]), L.charge.slice(), L.electrons.map((e) => e.n));
   let visited0 = tileBit.get(origin);
-  // The path can't pass over tiles where atoms start.
+  // The path can't pass over tiles where atoms or electrons start.
   for (let i = 1; i < n; i++) { const b = tileBit.get(L.pos[i]); if (b !== undefined) visited0 |= b; }
+  for (const e of L.electrons) { const b = tileBit.get(e.p); if (b !== undefined) visited0 |= b; }
 
   // A start with a fixed direction forces the first step, so it is taken up
   // front: the tile it leads to becomes part of the path and play begins there.
@@ -353,18 +393,22 @@ function makeEngine(L) {
     else startError = "The start's first step is blocked, so the level can't be played.";
   }
 
-  // A finished path: on the exit, every atom neutral, the molecule inside the level.
+  // Every atom neutral with no free electrons.
+  const settled = (s) => !need(s) && !looseFree(s) && !molCharge(s) && !looseCharge(s);
+
+  // A finished path: on the exit, every atom settled, the molecule inside the level.
   function isWin(s) {
-    if (s.pos[0] !== E || need(s) || looseFree(s)) return false;
+    if (s.pos[0] !== E || !settled(s)) return false;
     for (let i = 0; i < n; i++) if ((s.mol >> i & 1) && !tiles.has(s.pos[i])) return false;
     return true;
   }
 
-  return { n, E, tiles, tileBit, exitDir, need, looseFree, step, canFinish, isWin, origin, start, visited0, startError };
+  return { n, E, tiles, tileBit, ecell, exitDir, need, looseFree, molCharge, looseCharge, electronsLeft, settled,
+    blockedCells, step, canFinish, isWin, origin, start, visited0, startError };
 }
 
 function solve(L) {
-  const { n, E, tiles, tileBit, exitDir, need, looseFree, step, canFinish, start, visited0, startError } = makeEngine(L);
+  const { n, E, tiles, tileBit, exitDir, settled, blockedCells, step, canFinish, start, visited0, startError } = makeEngine(L);
   if (startError) return { type: "blocked", message: startError };
 
   // Can the path still reach the exit (from the right side) through unused tiles?
@@ -386,13 +430,12 @@ function solve(L) {
     return false;
   }
 
-  // Shortest route to the exit once the molecule can no longer bond (its shape is fixed).
+  // Shortest route to the exit once nothing can change any more (every atom
+  // settled, so the molecule's shape is fixed).
   function finish(s, visited) {
     const lead = s.pos[0];
-    const shape = [], blocked = new Set();
-    for (let i = 0; i < n; i++) {
-      if (s.mol >> i & 1) shape.push(s.pos[i] - lead); else blocked.add(s.pos[i]);
-    }
+    const shape = [], blocked = blockedCells(s);
+    for (let i = 0; i < n; i++) if (s.mol >> i & 1) shape.push(s.pos[i] - lead);
     const fits = (p) => shape.every((o) => !blocked.has(p + o));
     const inside = (p) => shape.every((o) => tiles.has(p + o));
     const prev = new Map([[lead, null]]);
@@ -430,8 +473,7 @@ function solve(L) {
       self.postMessage({ type: "progress", nodes, depth });
     } else if (nodes % 50000 === 0) self.postMessage({ type: "progress", nodes, depth });
     if (best !== null && path.length >= best.length) break;
-    if (!need(s)) {
-      if (looseFree(s)) continue;
+    if (settled(s)) {
       const rest = finish(s, v);
       if (rest !== null && (best === null || path.length + rest.length < best.length)) best = path + rest;
       continue;
@@ -444,7 +486,7 @@ function solve(L) {
       if (lead === E && exitDir && d !== exitDir) continue;
       const nxt = step(s, OFF[d]);
       if (!nxt || !canFinish(nxt)) continue;
-      if (lead === E && need(nxt)) continue; // the path ends on the exit
+      if (lead === E && !settled(nxt)) continue; // the path ends on the exit
       const nv = v | b;
       if (lead !== E && !exitReachable(lead, nv)) continue;
       let masks = seen.get(nxt.key);
@@ -461,7 +503,7 @@ function solve(L) {
   for (const d of best) { s = step(s, OFF[d]); frames.push(s); }
   return {
     type: "done", path: best, nodes,
-    frames: frames.map((f) => ({ pos: f.pos, mol: f.mol, bonds: f.bonds, free: f.free })),
+    frames: frames.map((f) => ({ pos: f.pos, mol: f.mol, bonds: f.bonds, free: f.free, charge: f.charge, elec: f.elec })),
   };
 }
 
@@ -497,6 +539,10 @@ const SAMPLES = [
   { name: "Two corners", text: "start=U\nexit=U\nH....\n.....\no...E\n.....\n....H" },
   { name: "Ammonia (15 moves)", text: "exit=R\n..H.....\n........\nn...H...\n........\n.H.....E\n........" },
   { name: "Small starter", text: "#######\n#.....#\n#h.H.E#\n#.....#\n#######" },
+  { name: "Oxygen ion", text: "[o+]...\n..-..H.\n......E\n.H....." },
+  { name: "Hydrogen over a hole", text: "h....\n#[H#]..E\n....." },
+  { name: "Electron over a hole", text: "exit=R\n.[-#].......\n[o+]..H..H.E\n.........." },
+  { name: "Double charge", text: "start=R\nexit=R\n...[--#]...\n[o++]......E\n.H....H....\n..........." },
 ];
 
 const TOOLS = [
@@ -509,8 +555,11 @@ const TOOLS = [
   { id: "N", label: "N", el: true },
   { id: "C", label: "C", el: true },
   { sep: true },
+  { id: "electron", label: "Electron", icon: '<span class="swatch" style="background:var(--electron)"></span>' },
+  { id: "charge", label: "Charge +", icon: "⊕" },
+  { sep: true },
   { id: "player", label: "Make player", icon: "◎" },
-  { id: "erase", label: "Remove atom", icon: "✕" },
+  { id: "erase", label: "Clear", icon: "✕" },
 ];
 
 let M = null;           // level model being edited
@@ -529,6 +578,44 @@ const valenceOf = (el) => (M.valence[el] ?? VAL[el] ?? 1);
 const colorOf = (el) => (VAL[el] !== undefined ? `var(--${el.toLowerCase()})` : "var(--x)");
 
 /* ---------- text <-> model ---------- */
+// A cell is { t: "floor" | "void" | "exit", atom: { el, player, charge } | null, e: electrons }.
+// Atoms and electrons may sit on a hole ("void") as well as on a tile.
+const blankCell = (t = "floor") => ({ t, atom: null, e: 0 });
+
+// One grid row -> cell tokens. "[...]" groups several characters into one cell.
+function rowTokens(row, r) {
+  const out = [];
+  for (let i = 0; i < row.length; i++) {
+    if (row[i] !== "[") { out.push(row[i]); continue; }
+    const j = row.indexOf("]", i);
+    if (j < 0) throw new Error(`Row ${r + 1}: "[" is missing its closing "]".`);
+    out.push(row.slice(i, j + 1));
+    i = j;
+  }
+  return out;
+}
+
+function parseCell(tok, known, r, c) {
+  const where = `row ${r + 1}, column ${c + 1}`;
+  if (tok === "#" || tok === " ") return blankCell("void");
+  if (tok === ".") return blankCell();
+  if (tok === "E") return blankCell("exit");
+  if (tok === "-") return { ...blankCell(), e: 1 };
+  if (tok.length === 1 && /[a-z]/i.test(tok) && known[tok.toUpperCase()] !== undefined)
+    return { ...blankCell(), atom: { el: tok.toUpperCase(), player: tok !== tok.toUpperCase(), charge: 0 } };
+  const m = tok.match(/^\[([A-Za-z]?)(\+*)(-*)(#?)\]$/);
+  if (!m || (m[1] && m[3]) || (!m[1] && m[2]) || (!m[1] && !m[3]))
+    throw new Error(`Can't read "${tok}" at ${where}. Use a letter, "-", or a group like [O+], [--] or [H#].`);
+  const cell = blankCell(m[4] ? "void" : "floor");
+  if (m[1]) {
+    const el = m[1].toUpperCase();
+    if (known[el] === undefined) throw new Error(`Unknown element "${m[1]}" at ${where}. Add a line like "valence: ${el}=2".`);
+    if (m[2].length > known[el]) throw new Error(`${el} at ${where} can have a charge of at most ${known[el]}.`);
+    cell.atom = { el, player: m[1] !== el, charge: m[2].length };
+  } else cell.e = m[3].length;
+  return cell;
+}
+
 function parseLevel(text) {
   const valence = {};
   let startDir = "", exitDir = "";
@@ -554,19 +641,22 @@ function parseLevel(text) {
   while (rows.length && !rows[0].trim()) rows.shift();
   while (rows.length && !rows[rows.length - 1].trim()) rows.pop();
   if (!rows.length) throw new Error("The level has no tiles.");
-  const h = rows.length, w = Math.max(...rows.map((r) => r.length));
+  const toks = rows.map(rowTokens);
+  const h = toks.length, w = Math.max(...toks.map((t) => t.length));
   const known = { ...VAL, ...valence };
   const cells = [];
-  for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) {
-    const ch = rows[r][c] ?? " ";
-    if (ch === "#" || ch === " ") cells.push({ t: "void", atom: null });
-    else if (ch === ".") cells.push({ t: "floor", atom: null });
-    else if (ch === "E") cells.push({ t: "exit", atom: null });
-    else if (/[a-z]/i.test(ch) && known[ch.toUpperCase()] !== undefined)
-      cells.push({ t: "floor", atom: { el: ch.toUpperCase(), player: ch !== ch.toUpperCase() } });
-    else throw new Error(`Unknown tile "${ch}" at row ${r + 1}, column ${c + 1}. For a new element add a line like "valence: ${ch.toUpperCase()}=2".`);
-  }
+  for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) cells.push(parseCell(toks[r][c] ?? " ", known, r, c));
   return { w, h, cells, startDir, exitDir, valence };
+}
+
+function cellText(x) {
+  const off = x.t === "void" ? "#" : "";
+  if (x.atom) {
+    const letter = x.atom.player ? x.atom.el.toLowerCase() : x.atom.el;
+    return x.atom.charge || off ? `[${letter}${"+".repeat(x.atom.charge)}${off}]` : letter;
+  }
+  if (x.e) return x.e === 1 && !off ? "-" : `[${"-".repeat(x.e)}${off}]`;
+  return x.t === "void" ? "#" : x.t === "exit" ? "E" : ".";
 }
 
 function serialize(m) {
@@ -577,36 +667,36 @@ function serialize(m) {
   if (extra.length) lines.push("valence: " + extra.map(([k, v]) => `${k}=${v}`).join(", "));
   for (let r = 0; r < m.h; r++) {
     let s = "";
-    for (let c = 0; c < m.w; c++) {
-      const x = m.cells[r * m.w + c];
-      s += x.t === "void" ? "#" : x.t === "exit" ? "E" : x.atom ? (x.atom.player ? x.atom.el.toLowerCase() : x.atom.el) : ".";
-    }
+    for (let c = 0; c < m.w; c++) s += cellText(m.cells[r * m.w + c]);
     lines.push(s);
   }
   return lines.join("\n");
 }
 
 function buildLevel() {
-  const tiles = [], atoms = [];
+  const tiles = [], atoms = [], electrons = [];
   let exit = null, exits = 0;
   for (let r = 0; r < M.h; r++) for (let c = 0; c < M.w; c++) {
-    const x = M.cells[r * M.w + c];
-    if (x.t === "void") continue;
-    tiles.push(enc(r, c));
-    if (x.t === "exit") { exit = enc(r, c); exits++; }
-    if (x.atom) atoms.push({ ...x.atom, p: enc(r, c) });
+    const x = M.cells[r * M.w + c], p = enc(r, c);
+    if (x.t !== "void") tiles.push(p);
+    if (x.t === "exit") { exit = p; exits++; }
+    if (x.atom) atoms.push({ ...x.atom, p, onTile: x.t !== "void" });
+    if (x.e) electrons.push({ p, n: x.e });
   }
   const players = atoms.filter((a) => a.player);
   if (!players.length) throw new Error("Pick the player's atom: choose Make player and click an atom (or use a lowercase letter in the text).");
   if (players.length > 1) throw new Error("There can be only one player atom.");
+  if (!players[0].onTile) throw new Error("The player's atom has to start on a tile, not a hole.");
   if (!exits) throw new Error("Place an exit tile (E).");
   if (exits > 1) throw new Error("There can be only one exit.");
+  for (const a of atoms) if (a.charge > valenceOf(a.el)) throw new Error(`${a.el} can have a charge of at most ${valenceOf(a.el)}.`);
   atoms.sort((a, b) => b.player - a.player);
   return {
-    tiles, exit,
+    tiles, exit, electrons,
     pos: atoms.map((a) => a.p),
     elems: atoms.map((a) => a.el),
     valence: atoms.map((a) => valenceOf(a.el)),
+    charge: atoms.map((a) => a.charge),
     startDir: M.startDir, exitDir: M.exitDir,
     maxLen: Math.max(0, +$("maxLen").value || 0),
     limit: Math.max(10000, +$("limit").value || 3000000),
@@ -624,8 +714,8 @@ function tri(cx, cy, dir, size) {
 
 // What the board shows: the try-mode game, a solution being played back, or (null) the editor.
 function scene() {
-  if (mode === "try" && game) return { frames: game.states, cur: game.states.length - 1, elems: game.L.elems, bounds: game.bounds, origin: game.G.origin, ghost: false };
-  if (mode === "solve" && sol) return { frames: sol.frames, cur, elems: sol.elems, bounds: sol.bounds, origin: sol.origin, ghost: true };
+  if (mode === "try" && game) return { frames: game.states, cur: game.states.length - 1, elems: game.L.elems, electrons: game.L.electrons, bounds: game.bounds, origin: game.G.origin, ghost: false };
+  if (mode === "solve" && sol) return { frames: sol.frames, cur, elems: sol.elems, electrons: sol.electrons, bounds: sol.bounds, origin: sol.origin, ghost: true };
   return null;
 }
 
@@ -633,15 +723,18 @@ function currentAtoms(sc) {
   if (sc) {
     const f = sc.frames[sc.cur];
     return {
-      atoms: f.pos.map((p, i) => { const [r, c] = dec(p); return { r, c, el: sc.elems[i], mol: !!(f.mol >> i & 1), free: f.free[i], player: i === 0 }; }),
+      atoms: f.pos.map((p, i) => { const [r, c] = dec(p); return { r, c, el: sc.elems[i], mol: !!(f.mol >> i & 1), free: f.free[i], charge: f.charge[i], player: i === 0 }; }),
       bonds: f.bonds,
+      electrons: sc.electrons.map((e, k) => { const [r, c] = dec(e.p); return { r, c, n: f.elec[k], init: e.n }; }),
     };
   }
-  const atoms = [];
+  const atoms = [], electrons = [];
   M.cells.forEach((x, k) => {
-    if (x.atom) atoms.push({ r: Math.floor(k / M.w), c: k % M.w, el: x.atom.el, mol: x.atom.player, free: valenceOf(x.atom.el), player: x.atom.player });
+    const r = Math.floor(k / M.w), c = k % M.w;
+    if (x.atom) atoms.push({ r, c, el: x.atom.el, mol: x.atom.player, free: valenceOf(x.atom.el) - x.atom.charge, charge: x.atom.charge, player: x.atom.player });
+    if (x.e) electrons.push({ r, c, n: x.e, init: x.e });
   });
-  return { atoms, bonds: [] };
+  return { atoms, bonds: [], electrons };
 }
 
 function draw() {
@@ -668,7 +761,7 @@ function draw() {
       continue;
     }
     out.push(`<rect x="${X + 2}" y="${Y + 2}" width="${S - 4}" height="${S - 4}" rx="9" fill="var(--tile)" stroke="var(--tile-edge)"/>`);
-    if (x.atom && !x.atom.player) {
+    if ((x.atom && !x.atom.player) || x.e) {
       out.push(`<path d="M${X + 9} ${Y + 9} l6 0 M${X + 9} ${Y + 9} l0 6" stroke="var(--tile-edge)" stroke-width="2" fill="none"/>`);
     }
   }
@@ -717,8 +810,25 @@ function draw() {
   }
 
   // bonds and atoms
-  const { atoms, bonds } = currentAtoms(sc);
+  const { atoms, bonds, electrons } = currentAtoms(sc);
   const R = S * 0.3;
+  for (const e of electrons) {
+    // In try mode captured electrons stay behind in grey; elsewhere only the ones left show.
+    const shown = mode === "try" ? e.init : e.n;
+    if (!shown) continue;
+    const cx = e.c * S + S / 2, cy = e.r * S + S / 2;
+    const offLevel = sc && !isTile(e.r, e.c);
+    out.push(`<g${offLevel ? ' opacity="0.55"' : ""}>`);
+    // Up to four electrons are drawn separately; more show a count.
+    const spots = shown === 1 ? [[0, 0]] : shown === 2 ? [[-9, -9], [9, 9]] : shown === 3 ? [[0, -11], [-10, 8], [10, 8]] : [[-10, -10], [10, -10], [-10, 10], [10, 10]];
+    spots.forEach(([dx, dy], k) => {
+      const live = k < e.n || (shown > 4 && e.n > 0);
+      out.push(`<circle cx="${cx + dx}" cy="${cy + dy}" r="9" fill="${live ? "var(--electron)" : "var(--used)"}"/>`);
+      out.push(`<rect x="${cx + dx - 4}" y="${cy + dy - 1.25}" width="8" height="2.5" rx="1.25" fill="${live ? "var(--atom-text)" : "var(--used-ink)"}"/>`);
+    });
+    if (shown > 4) out.push(`<text x="${cx}" y="${cy + 4}" text-anchor="middle" font-family="Lexend, system-ui, sans-serif" font-weight="700" font-size="12" fill="var(--ink)">${e.n === shown ? e.n : `${e.n}/${shown}`}</text>`);
+    out.push("</g>");
+  }
   // try mode: a grey ghost stays on the tile where each moved atom started
   if (mode === "try" && game) {
     game.L.pos.forEach((p, i) => {
@@ -745,7 +855,8 @@ function draw() {
     const offLevel = sc && !isTile(a.r, a.c);
     out.push(`<g${offLevel ? ' opacity="0.55"' : ""}>`);
     out.push(`<circle cx="${cx}" cy="${cy}" r="${R}" fill="${colorOf(a.el)}"${a.mol ? ' stroke="var(--ink)" stroke-width="3"' : ""}/>`);
-    out.push(`<text x="${cx}" y="${cy + 5.5}" text-anchor="middle" font-family="Lexend, system-ui, sans-serif" font-weight="700" font-size="16" fill="var(--atom-text)">${a.player ? a.el.toLowerCase() : a.el}</text>`);
+    const sup = a.charge ? `<tspan font-size="11" dy="-6">${a.charge > 1 ? a.charge : ""}+</tspan>` : "";
+    out.push(`<text x="${cx}" y="${cy + 5.5}" text-anchor="middle" font-family="Lexend, system-ui, sans-serif" font-weight="700" font-size="16" fill="var(--atom-text)">${a.player ? a.el.toLowerCase() : a.el}${sup}</text>`);
     for (let e = 0; e < a.free; e++) {
       const ang = (-135 + e * (360 / Math.max(a.free, 4))) * Math.PI / 180;
       out.push(`<circle cx="${cx + Math.cos(ang) * (R + 5)}" cy="${cy + Math.sin(ang) * (R + 5)}" r="3" fill="var(--ink)"/>`);
@@ -765,21 +876,35 @@ function applyTool(r, c) {
   const x = M.cells[r * M.w + c];
   const before = JSON.stringify(x);
   switch (tool) {
+    // Holes keep what's on them: atoms and electrons may start off the level.
     case "floor": x.t = "floor"; break;
-    case "void": x.t = "void"; x.atom = null; break;
+    case "void": x.t = "void"; break;
     case "exit":
       M.cells.forEach((y) => { if (y.t === "exit") y.t = "floor"; });
-      x.t = "exit"; x.atom = null; break;
+      x.t = "exit"; x.atom = null; x.e = 0; break;
     case "player":
       M.cells.forEach((y) => { if (y.atom) y.atom.player = false; });
-      if (!x.atom) x.atom = { el: lastEl, player: true }; else x.atom.player = true;
-      if (x.t !== "floor") x.t = "floor";
+      if (!x.atom) x.atom = { el: lastEl, player: true, charge: 0 }; else x.atom.player = true;
+      if (x.t === "exit") x.t = "floor";
+      x.e = 0;
       break;
-    case "erase": x.atom = null; break;
-    default:
-      if (x.t !== "floor") x.t = "floor";
-      x.atom = { el: tool, player: x.atom ? x.atom.player : false };
+    case "electron":
+      if (x.atom) return false;
+      if (x.t === "exit") x.t = "floor";
+      x.e = Math.min(9, (x.e || 0) + 1);
+      break;
+    case "charge":
+      if (!x.atom) return false;
+      x.atom.charge = (x.atom.charge + 1) % (valenceOf(x.atom.el) + 1);
+      break;
+    case "erase": x.atom = null; x.e = 0; break;
+    default: {
+      if (x.t === "exit") x.t = "floor";
+      const keep = x.atom && x.atom.el === tool ? x.atom.charge : 0;
+      x.atom = { el: tool, player: x.atom ? x.atom.player : false, charge: keep };
+      x.e = 0;
       lastEl = tool;
+    }
   }
   return JSON.stringify(x) !== before;
 }
@@ -807,7 +932,7 @@ function resize(w, h) {
   w = Math.min(24, Math.max(1, w | 0)); h = Math.min(24, Math.max(1, h | 0));
   const cells = [];
   for (let r = 0; r < h; r++) for (let c = 0; c < w; c++)
-    cells.push(r < M.h && c < M.w ? M.cells[r * M.w + c] : { t: "floor", atom: null });
+    cells.push(r < M.h && c < M.w ? M.cells[r * M.w + c] : blankCell());
   M.w = w; M.h = h; M.cells = cells;
   modelChanged();
 }
@@ -876,7 +1001,7 @@ function showSolution(L, data, secs) {
     const [r, c] = dec(p);
     r0 = Math.min(r0, r); c0 = Math.min(c0, c); r1 = Math.max(r1, r); c1 = Math.max(c1, c);
   }
-  sol = { path: data.path, frames: data.frames, elems: L.elems, origin: L.pos[0], bounds: { r0, c0, r1, c1 } };
+  sol = { path: data.path, frames: data.frames, elems: L.elems, electrons: L.electrons, origin: L.pos[0], bounds: { r0, c0, r1, c1 } };
   cur = 0;
   const arrows = [...data.path].map((d) => ARROW[d]).join("");
   setStatus(`<b>Solved in ${data.path.length} moves</b> (${data.nodes.toLocaleString()} states, ${secs}s)<div class="solution">${data.path}<br>${arrows}</div>`, "ok");
@@ -946,11 +1071,15 @@ function checkMove(d) {
   if (v & b) {
     if (lead === L.pos[0]) return { lead, reason: "The path can't go back over the start." };
     if (L.pos.includes(lead)) return { lead, reason: "The path can't cross a tile where an atom started." };
+    if (L.electrons.some((e) => e.p === lead)) return { lead, reason: "The path can't cross a tile where an electron started." };
     return { lead, reason: "The path can't cross itself." };
   }
   if (lead === G.E && L.exitDir && d !== L.exitDir) return { lead, reason: `The exit has to be entered going ${DIRNAME[L.exitDir]}.` };
   const next = G.step(s, Engine.OFF[d]);
-  if (!next) return { lead, reason: "An atom is in the way." };
+  if (!next) {
+    const hitsElectron = L.electrons.some((e, k) => s.elec[k] && s.pos.some((p, i) => (s.mol >> i & 1) && p + Engine.OFF[d] === e.p));
+    return { lead, reason: hitsElectron ? "An electron is in the way." : "An atom is in the way." };
+  }
   return { lead, next, nv: v | b };
 }
 
@@ -1002,7 +1131,7 @@ function afterTryChange() {
   }
   game.bounds = b;
   game.over = s.pos[0] === G.E;
-  const free = G.need(s) + G.looseFree(s);
+  const left = leftText(G, s);
   const won = game.won = game.over && G.isWin(s);
   $("trycount").textContent = `${path.length} move${path.length === 1 ? "" : "s"}`;
   $("trypath").textContent = [...path].map((d) => ARROW[d]).join("");
@@ -1014,19 +1143,24 @@ function afterTryChange() {
     if (sol) extra = sol.path.length < path.length ? ` The shortest solution takes ${sol.path.length}.` : " That's the shortest possible.";
     tryMessage(`<b>Solved in ${path.length} moves!</b>${extra}`, "win");
   } else if (game.over) {
-    tryMessage(free
-      ? `You reached the exit with ${free} free electron${free === 1 ? "" : "s"} left. Undo and try another route.`
+    tryMessage(left
+      ? `You reached the exit with ${left} left. Undo and try another route.`
       : "Part of the molecule is outside the level. Undo and try another route.", "err");
   } else if (!G.canFinish(s)) {
-    tryMessage(G.need(s)
-      ? "No loose atom has a free electron left to bond with. Undo or restart."
-      : "Your molecule is full, but some loose atoms still have free electrons. Undo or restart.", "err");
+    tryMessage(`Not every atom can end neutral from here (${left} left). Undo or restart.`, "err");
   } else {
-    tryMessage(path.length
-      ? `${free} free electron${free === 1 ? "" : "s"} left on the board.`
-      : `Draw a path to the exit. ${free} free electrons to use up.`);
+    tryMessage(path.length ? `${left} left on the board.` : `Draw a path to the exit. ${left} to use up.`);
   }
   draw();
+}
+
+// "3 free electrons and 1 charge", or "" when every atom is settled.
+function leftText(G, s) {
+  const free = G.need(s) + G.looseFree(s), charge = G.molCharge(s) + G.looseCharge(s);
+  const parts = [];
+  if (free) parts.push(`${free} free electron${free === 1 ? "" : "s"}`);
+  if (charge) parts.push(`${charge} charge${charge === 1 ? "" : "s"}`);
+  return parts.join(" and ");
 }
 
 // Try mode on the board: dragging or clicking into a tile next to the atom moves it there.

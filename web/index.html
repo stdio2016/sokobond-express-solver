@@ -721,6 +721,12 @@ function buildLevel() {
   if (!exits) throw new Error("Place an exit tile (E).");
   if (exits > 1) throw new Error("There can be only one exit.");
   for (const a of atoms) if (a.charge > valenceOf(a.el)) throw new Error(`${a.el} can have a charge of at most ${valenceOf(a.el)}.`);
+  // Charges only change by capturing electrons (one each), so whether they can
+  // all be cleared is decided by the level itself, not by how it's played.
+  const charges = atoms.reduce((t, a) => t + a.charge, 0), elecs = electrons.reduce((t, e) => t + e.n, 0);
+  if (charges > elecs) throw new Error(`The level has ${charges} charge${charges === 1 ? "" : "s"} but only ${elecs} electron${elecs === 1 ? "" : "s"}, so not every ion can become neutral.`);
+  const stuck = atoms.find((a) => !a.player && a.charge && a.charge === valenceOf(a.el));
+  if (stuck) throw new Error(`A loose ${stuck.el}${stuck.charge > 1 ? stuck.charge : ""}+ has no free electrons, so it can never join the molecule and become neutral.`);
   atoms.sort((a, b) => b.player - a.player);
   return {
     tiles, exit, electrons,
@@ -1096,7 +1102,7 @@ function checkMove(d) {
   const { G, L, stack } = game;
   const { s, v } = stack[stack.length - 1];
   const lead = s.pos[0] + Engine.OFF[d];
-  if (s.pos[0] === G.E) return { lead, reason: "The path has reached the exit. Undo to change it." };
+  if (s.pos[0] === G.E) return { lead, reason: "" }; // the path has ended: further moves are ignored
   const b = G.tileBit.get(lead);
   if (b === undefined) return { lead, reason: "The path has to stay on level tiles." };
   if (v & b) {
@@ -1123,7 +1129,7 @@ function tryMove(d) {
     return;
   }
   const m = checkMove(d);
-  if (!m.next) { tryMessage(m.reason, "err"); return; }
+  if (!m.next) { if (m.reason) tryMessage(m.reason, "err"); return; }
   stack.push({ s: m.next, v: m.nv });
   game.path += d;
   afterTryChange();
@@ -1178,9 +1184,10 @@ function afterTryChange() {
       ? `You reached the exit with ${left} left. Undo and try another route.`
       : "Part of the molecule is outside the level. Undo and try another route.", "err");
   } else if (!G.canFinish(s)) {
-    tryMessage(`Not every atom can end neutral from here (${left} left). Undo or restart.`, "err");
+    tryMessage("Not all free electrons can be used from here. Undo or restart.", "err");
   } else {
-    tryMessage(path.length ? `${left} left on the board.` : `Draw a path to the exit. ${left} to use up.`);
+    tryMessage(!left ? "Every atom is settled. Head to the exit."
+      : path.length ? `${left} left on the board.` : `Draw a path to the exit. ${left} to use up.`);
   }
   draw();
 }

@@ -296,49 +296,80 @@ function makeEngine(L) {
   const molCharge = (s) => sumMol(s, s.charge, true);
   const looseCharge = (s) => sumMol(s, s.charge, false);
   const electronsLeft = (s) => s.elec.reduce((a, b) => a + b, 0);
+  const pairKey = (i, j) => i < j ? i * 64 + j : j * 64 + i;
+  // Which pairs are bonded matters for later bonding (an existing bond never
+  // grows), so the bonded pairs are part of the state's identity.
   const mk = (pos, mol, bonds, free, charge, elec) => ({
     pos, mol, bonds, free, charge, elec,
-    key: pos.join(",") + "|" + mol + "|" + free.join(",") + "|" + charge.join(",") + "|" + elec.join(","),
+    key: pos.join(",") + "|" + mol + "|" + free.join(",") + "|" + charge.join(",") + "|" + elec.join(",") + "|" +
+      [...new Set(bonds.map(([i, j]) => pairKey(i, j)))].sort((a, b) => a - b).join(","),
   });
 
-  // After a step: molecule ions capture electrons from neighbouring cells (one
-  // per cell they touch), and molecule atoms bond with neighbours, until
-  // nothing changes.
+  // After a step, first molecule ions capture electrons, then bonds form.
   function resolve(pos, mol, bonds, free, charge, elec) {
     free = free.slice(); charge = charge.slice(); elec = elec.slice();
-    let bondsCopied = false;
+
+    // Capture: a molecule ion takes one electron from each neighbouring cell holding any.
+    for (let i = 0; i < n; i++) {
+      if (!(mol >> i & 1)) continue;
+      for (const d of DK) {
+        if (!charge[i]) break;
+        const k = ecell.get(pos[i] + OFF[d]);
+        if (k === undefined || !elec[k]) continue;
+        elec[k]--; charge[i]--; free[i]++;
+      }
+    }
+
+    // Bonding, in phases of rounds. A pair can bond when both atoms are
+    // adjacent and free (have free electrons), at least one was in the molecule
+    // when the phase began, and they weren't bonded before this step (existing
+    // bonds never change multiplicity). An atom with more such partners than
+    // free electrons is ambiguous, and so is anything that could bond with an
+    // ambiguous atom. Every other atom bonds once with each partner, all at the
+    // same time. Rounds repeat within the phase until no bond forms, which
+    // builds double/triple/quadruple bonds. Loose atoms that bonded join the
+    // molecule, and only then does a new phase let them bond outward (chain
+    // reaction). Phases repeat until the molecule stops growing.
     const at = new Map();
     pos.forEach((p, i) => at.set(p, i));
-    const touched = new Set();
-    let changed = true;
-    while (changed) {
-      changed = false;
-      const order = [];
-      for (let i = 0; i < n; i++) if (mol >> i & 1) order.push(i);
-      order.sort((a, b) => pos[a] - pos[b]);
-      for (const i of order) {
-        for (const d of DK) {
-          if (!charge[i]) break;
-          const k = ecell.get(pos[i] + OFF[d]);
-          if (k === undefined || !elec[k] || touched.has(i * 4096 + k)) continue;
-          touched.add(i * 4096 + k);
-          elec[k]--; charge[i]--; free[i]++;
-          changed = true;
+    const before = new Set(bonds.map(([i, j]) => pairKey(i, j)));
+    let bondsCopied = false;
+    let phaseMol = mol;
+    for (;;) {
+      const partners = [];
+      for (let i = 0; i < n; i++) {
+        const list = [];
+        if (free[i]) {
+          for (const d of DK) {
+            const j = at.get(pos[i] + OFF[d]);
+            if (j === undefined || !free[j] || before.has(pairKey(i, j))) continue;
+            if (!(phaseMol >> i & 1) && !(phaseMol >> j & 1)) continue; // loose atoms only bond with the molecule
+            list.push(j);
+          }
         }
+        partners.push(list);
       }
-      for (const i of order) {
-        for (const d of DK) {
-          if (!free[i]) break;
-          const j = at.get(pos[i] + OFF[d]);
-          if (j === undefined || (mol >> j & 1) || !free[j]) continue;
-          if (!bondsCopied) { bonds = bonds.slice(); bondsCopied = true; }
-          // Neighbours with several free electrons form as many bonds as they can.
-          const k = Math.min(free[i], free[j]);
-          for (let b = 0; b < k; b++) bonds.push([Math.min(i, j), Math.max(i, j)]);
-          free[i] -= k; free[j] -= k;
-          mol |= 1 << j;
-          changed = true;
-        }
+      const ambiguous = partners.map((list, i) => list.length > free[i]);
+      const spread = [];
+      ambiguous.forEach((a, i) => { if (a) spread.push(i); });
+      while (spread.length) {
+        for (const j of partners[spread.pop()]) if (!ambiguous[j]) { ambiguous[j] = true; spread.push(j); }
+      }
+      const formed = [];
+      for (let i = 0; i < n; i++) {
+        if (ambiguous[i]) continue;
+        for (const j of partners[i]) if (i < j) formed.push([i, j]);
+      }
+      if (!formed.length) {
+        if (mol === phaseMol) break;  // nothing joined: done
+        phaseMol = mol;               // newly joined atoms may now bond outward
+        continue;
+      }
+      if (!bondsCopied) { bonds = bonds.slice(); bondsCopied = true; }
+      for (const [i, j] of formed) {
+        bonds.push([i, j]);
+        free[i]--; free[j]--;
+        mol |= (1 << i) | (1 << j);
       }
     }
     return mk(pos, mol, bonds, free, charge, elec);

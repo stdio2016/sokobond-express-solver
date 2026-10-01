@@ -11,6 +11,9 @@ Since the first move is forced, it is taken automatically: the tile it leads to
 becomes part of the path (an obstacle like the start) and drawing begins there.
 It is not counted as a move.
 * Cannot draw path past any initial atoms, initial electrons, start point, end point.
+* The start point can be the same tile as the end point, forming a loop: the
+path leaves the start and ends when it comes back to it (entering from the
+exit's direction, if it has one).
 * A crossing is a tile the path may pass twice: once horizontally and once
 vertically. On a crossing the path must go straight on, never turn 90 degrees.
 Nothing starts on a crossing, and the exit is never one.

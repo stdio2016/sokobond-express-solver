@@ -250,6 +250,7 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
             <dt>[O+] [n++]</dt><dd>an ion: one + per charge (one less free electron each)</dd>
             <dt>[--]</dt><dd>several electrons in one cell</dd>
             <dt>[H#] [-#]</dt><dd># inside brackets: starts on a hole, not a tile</dd>
+            <dt>[oE]</dt><dd>the player's atom starts on the exit: the path is a loop</dd>
             <dt>valence: X=2</dt><dd>add a new element</dd>
           </dl>
         </details>
@@ -413,7 +414,9 @@ function makeEngine(L) {
 
   const origin = L.pos[0];
   let start = resolve(L.pos.slice(), 1, [], L.pos.map((_, i) => L.valence[i] - L.charge[i]), L.charge.slice(), L.electrons.map((e) => e.n));
-  let visited0 = tileBit.get(origin);
+  // The path can't come back over the start, unless the start is also the
+  // exit (a loop): then coming back is how the path ends.
+  let visited0 = origin === E ? 0n : tileBit.get(origin);
   // The path can't pass over tiles where atoms or electrons start.
   for (let i = 1; i < n; i++) { const b = tileBit.get(L.pos[i]); if (b !== undefined) visited0 |= b; }
   for (const e of L.electrons) { const b = tileBit.get(e.p); if (b !== undefined) visited0 |= b; }
@@ -433,9 +436,13 @@ function makeEngine(L) {
   // Every atom neutral with no free electrons.
   const settled = (s) => !need(s) && !looseFree(s) && !molCharge(s) && !looseCharge(s);
 
+  // The path has ended once the lead is on the exit, except at the very start
+  // of a loop, where it is still waiting to leave.
+  const ended = (s) => s.pos[0] === E && (s !== start || origin !== E);
+
   // A finished path: on the exit, every atom settled, the molecule inside the level.
   function isWin(s) {
-    if (s.pos[0] !== E || !settled(s)) return false;
+    if (!ended(s) || !settled(s)) return false;
     for (let i = 0; i < n; i++) if ((s.mol >> i & 1) && !tiles.has(s.pos[i])) return false;
     return true;
   }
@@ -444,11 +451,11 @@ function makeEngine(L) {
   const startHeading = startDir && !startError ? startDir : "";
 
   return { n, E, tiles, tileBit, cross, pathBit, ecell, exitDir, need, looseFree, molCharge, looseCharge, electronsLeft, settled,
-    blockedCells, step, canFinish, isWin, origin, start, visited0, startError, startHeading };
+    blockedCells, step, canFinish, ended, isWin, origin, start, visited0, startError, startHeading };
 }
 
 function solve(L) {
-  const { n, E, tiles, tileBit, cross, pathBit, exitDir, settled, blockedCells, step, canFinish, isWin, start, visited0, startError, startHeading } = makeEngine(L);
+  const { n, E, tiles, tileBit, cross, pathBit, exitDir, settled, blockedCells, step, canFinish, ended, isWin, start, visited0, startError, startHeading } = makeEngine(L);
   if (startError) return { type: "blocked", message: startError };
 
   // Can the path still reach the exit (from the right side) through unused
@@ -482,22 +489,25 @@ function solve(L) {
     for (let i = 0; i < n; i++) if (s.mol >> i & 1) shape.push(s.pos[i] - lead);
     const fits = (p) => shape.every((o) => !blocked.has(p + o));
     const inside = (p) => shape.every((o) => tiles.has(p + o));
+    // The shape is fixed, so whether it ends inside the level is known up front.
+    if (!inside(E)) return null;
+    if (ended(s)) return "";
+    const route = (p, d) => {
+      const out = [d];
+      while (prev.get(p)) { const [q, e] = prev.get(p); out.push(e); p = q; }
+      return out.reverse().join("");
+    };
     const prev = new Map([[lead, null]]);
     const queue = [lead];
     for (let h = 0; h < queue.length; h++) {
       const p = queue[h];
-      if (p === E) {
-        if (!inside(p)) return null;
-        const out = [];
-        let cur = p;
-        while (prev.get(cur)) { const [q, d] = prev.get(cur); out.push(d); cur = q; }
-        return out.reverse().join("");
-      }
       for (const d of DK) {
         const q = p + OFF[d];
         const b = tileBit.get(q);
-        if (b === undefined || (visited & b) || prev.has(q) || !fits(q)) continue;
-        if (q === E && exitDir && d !== exitDir) continue;
+        if (b === undefined || !fits(q)) continue;
+        // Reaching the exit ends the path (in a loop the exit is where it began).
+        if (q === E) { if (!exitDir || d === exitDir) return route(p, d); continue; }
+        if ((visited & b) || prev.has(q)) continue;
         prev.set(q, [p, d]);
         queue.push(q);
       }
@@ -527,7 +537,7 @@ function solve(L) {
       }
       if (isWin(s)) { best = path; break; }
     }
-    if (s.pos[0] === E || (L.maxLen && path.length >= L.maxLen)) continue;
+    if (ended(s) || (L.maxLen && path.length >= L.maxLen)) continue;
     // On a crossing the path has to go straight on.
     const heading = path ? path[path.length - 1] : startHeading;
     for (const d of DK) {
@@ -598,6 +608,7 @@ const SAMPLES = [
   { name: "Electron over a hole", text: "exit=R\n.[-#].......\n[o+]..H..H.E\n.........." },
   { name: "Double charge", text: "start=R\nexit=R\n...[--#]...\n[o++]......E\n.H....H....\n..........." },
   { name: "Crossing", text: "exit=D\n.....\n.#.#.\nh.+..\n##.#H\n##E##\n##.##" },
+  { name: "Loop", text: "..H..\n.....\nH.[cE].H\n.....\n..H.." },
 ];
 
 const TOOLS = [
@@ -660,10 +671,13 @@ function parseCell(tok, known, r, c) {
   if (tok === "-") return { ...blankCell(), e: 1 };
   if (tok.length === 1 && /[a-z]/i.test(tok) && known[tok.toUpperCase()] !== undefined)
     return { ...blankCell(), atom: { el: tok.toUpperCase(), player: tok !== tok.toUpperCase(), charge: 0 } };
-  const m = tok.match(/^\[([A-Za-z]?)(\+*)(-*)(#?)\]$/);
+  // [letter][+...][-...][# for a hole | E for the exit, under the player's atom]
+  const m = tok.match(/^\[([A-Za-z]?)(\+*)(-*)(#|E)?\]$/);
   if (!m || (m[1] && m[3]) || (!m[1] && m[2]) || (!m[1] && !m[3]))
-    throw new Error(`Can't read "${tok}" at ${where}. Use a letter, "-", or a group like [O+], [--] or [H#].`);
-  const cell = blankCell(m[4] ? "void" : "floor");
+    throw new Error(`Can't read "${tok}" at ${where}. Use a letter, "-", or a group like [O+], [--], [H#] or [oE].`);
+  if (m[4] === "E" && !(m[1] && m[1] !== m[1].toUpperCase()))
+    throw new Error(`Only the player's atom (a lowercase letter) can start on the exit, at ${where}.`);
+  const cell = blankCell(m[4] === "#" ? "void" : m[4] === "E" ? "exit" : "floor");
   if (m[1]) {
     const el = m[1].toUpperCase();
     if (known[el] === undefined) throw new Error(`Unknown element "${m[1]}" at ${where}. Add a line like "valence: ${el}=2".`);
@@ -707,7 +721,7 @@ function parseLevel(text) {
 }
 
 function cellText(x) {
-  const off = x.t === "void" ? "#" : "";
+  const off = x.t === "void" ? "#" : x.t === "exit" ? "E" : "";
   if (x.atom) {
     const letter = x.atom.player ? x.atom.el.toLowerCase() : x.atom.el;
     return x.atom.charge || off ? `[${letter}${"+".repeat(x.atom.charge)}${off}]` : letter;
@@ -739,6 +753,7 @@ function buildLevel() {
     if (x.t === "exit") { exit = p; exits++; }
     if (x.t === "cross") crossings.push(p);
     if (x.atom) atoms.push({ ...x.atom, p, onTile: x.t !== "void" });
+    if (x.t === "exit" && (x.e || (x.atom && !x.atom.player))) throw new Error("Only the player's atom can start on the exit (making the path a loop).");
     if (x.e) electrons.push({ p, n: x.e });
   }
   const players = atoms.filter((a) => a.player);
@@ -835,14 +850,6 @@ function draw() {
   }
 
   // start pad and exit
-  if (startCell) {
-    const [r, c] = startCell, X = c * S, Y = r * S;
-    out.push(`<rect x="${X + 7}" y="${Y + 7}" width="${S - 14}" height="${S - 14}" rx="7" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="4 3"/>`);
-    if (M.startDir) {
-      const [dr, dc] = DIRV[M.startDir];
-      out.push(`<polygon points="${tri(X + S / 2 + dc * S * 0.4, Y + S / 2 + dr * S * 0.4, M.startDir, 6)}" fill="var(--accent)"/>`);
-    }
-  }
   M.cells.forEach((x, k) => {
     if (x.t !== "exit") return;
     const r = Math.floor(k / M.w), c = k % M.w, X = c * S, Y = r * S;
@@ -855,6 +862,15 @@ function draw() {
       out.push(`<circle cx="${X + S / 2}" cy="${Y + S / 2}" r="4" fill="var(--bg)"/>`);
     }
   });
+  // drawn after the exit so a loop's start still shows on top of it
+  if (startCell) {
+    const [r, c] = startCell, X = c * S, Y = r * S;
+    out.push(`<rect x="${X + 7}" y="${Y + 7}" width="${S - 14}" height="${S - 14}" rx="7" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="4 3"/>`);
+    if (M.startDir) {
+      const [dr, dc] = DIRV[M.startDir];
+      out.push(`<polygon points="${tri(X + S / 2 + dc * S * 0.4, Y + S / 2 + dr * S * 0.4, M.startDir, 6)}" fill="var(--accent)"/>`);
+    }
+  }
 
   // path
   if (sc) {
@@ -949,13 +965,15 @@ function applyTool(r, c) {
     case "void": x.t = "void"; break;
     case "exit":
       M.cells.forEach((y) => { if (y.t === "exit") y.t = "floor"; });
-      x.t = "exit"; x.atom = null; x.e = 0; break;
+      x.t = "exit"; x.e = 0;
+      if (!(x.atom && x.atom.player)) x.atom = null; // the exit under the player's atom makes a loop
+      break;
     // Nothing starts on a crossing.
     case "cross": x.t = "cross"; x.atom = null; x.e = 0; break;
     case "player":
       M.cells.forEach((y) => { if (y.atom) y.atom.player = false; });
       if (!x.atom) x.atom = { el: lastEl, player: true, charge: 0 }; else x.atom.player = true;
-      if (x.t === "exit" || x.t === "cross") x.t = "floor";
+      if (x.t === "cross") x.t = "floor";
       x.e = 0;
       break;
     case "electron":
@@ -969,7 +987,7 @@ function applyTool(r, c) {
       break;
     case "erase": x.atom = null; x.e = 0; break;
     default: {
-      if (x.t === "exit" || x.t === "cross") x.t = "floor";
+      if (x.t === "cross" || (x.t === "exit" && !(x.atom && x.atom.player))) x.t = "floor";
       const keep = x.atom && x.atom.el === tool ? x.atom.charge : 0;
       x.atom = { el: tool, player: x.atom ? x.atom.player : false, charge: keep };
       x.e = 0;
@@ -1135,7 +1153,7 @@ function checkMove(d) {
   const { G, L, stack } = game;
   const { s, v } = stack[stack.length - 1];
   const lead = s.pos[0] + Engine.OFF[d];
-  if (s.pos[0] === G.E) return { lead, reason: "" }; // the path has ended: further moves are ignored
+  if (G.ended(s)) return { lead, reason: "" }; // the path has ended: further moves are ignored
   if (G.cross.has(s.pos[0])) {
     const heading = game.path ? game.path[game.path.length - 1] : G.startHeading;
     if (d !== heading) return { lead, reason: "The path has to go straight on over a crossing." };
@@ -1205,7 +1223,7 @@ function afterTryChange() {
     b.r0 = Math.min(b.r0, r); b.c0 = Math.min(b.c0, c); b.r1 = Math.max(b.r1, r); b.c1 = Math.max(b.c1, c);
   }
   game.bounds = b;
-  game.over = s.pos[0] === G.E;
+  game.over = G.ended(s);
   const left = leftText(G, s);
   const won = game.won = game.over && G.isWin(s);
   $("trycount").textContent = `${path.length} move${path.length === 1 ? "" : "s"}`;

@@ -240,6 +240,7 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
           <dl>
             <dt>.</dt><dd>level tile</dd>
             <dt>E</dt><dd>exit</dd>
+            <dt>+</dt><dd>crossing: the path may pass twice, once each way, going straight</dd>
             <dt># or space</dt><dd>outside the level</dd>
             <dt>H O N C</dt><dd>loose atoms with 1–4 electrons</dd>
             <dt>h o n c</dt><dd>the player's atom</dd>
@@ -284,6 +285,11 @@ function makeEngine(L) {
   const E = L.exit;
   const tileBit = new Map();
   L.tiles.forEach((p, k) => tileBit.set(p, 1n << BigInt(k)));
+  // A crossing can be passed once horizontally and once vertically, so it has
+  // a second bit for the vertical pass.
+  const cross = new Set(L.crossings);
+  const crossV = new Map(L.crossings.map((p, k) => [p, 1n << BigInt(L.tiles.length + k)]));
+  const pathBit = (p, d) => (d === "U" || d === "D") && cross.has(p) ? crossV.get(p) : tileBit.get(p);
   const tiles = new Set(L.tiles);
   const { startDir, exitDir } = L;
   // Electron cells: code -> index into a state's electron counts.
@@ -417,7 +423,7 @@ function makeEngine(L) {
   let startError = "";
   if (startDir) {
     const lead = origin + OFF[startDir];
-    const b = tileBit.get(lead);
+    const b = pathBit(lead, startDir);
     const next = b !== undefined && !(visited0 & b) && (lead !== E || !exitDir || exitDir === startDir)
       ? step(start, OFF[startDir]) : null;
     if (next) { start = next; visited0 |= b; }
@@ -434,17 +440,22 @@ function makeEngine(L) {
     return true;
   }
 
-  return { n, E, tiles, tileBit, ecell, exitDir, need, looseFree, molCharge, looseCharge, electronsLeft, settled,
-    blockedCells, step, canFinish, isWin, origin, start, visited0, startError };
+  // The heading the path starts with: the automatic first step, if any.
+  const startHeading = startDir && !startError ? startDir : "";
+
+  return { n, E, tiles, tileBit, cross, pathBit, ecell, exitDir, need, looseFree, molCharge, looseCharge, electronsLeft, settled,
+    blockedCells, step, canFinish, isWin, origin, start, visited0, startError, startHeading };
 }
 
 function solve(L) {
-  const { n, E, tiles, tileBit, exitDir, settled, blockedCells, step, canFinish, start, visited0, startError } = makeEngine(L);
+  const { n, E, tiles, tileBit, cross, pathBit, exitDir, settled, blockedCells, step, canFinish, isWin, start, visited0, startError, startHeading } = makeEngine(L);
   if (startError) return { type: "blocked", message: startError };
 
-  // Can the path still reach the exit (from the right side) through unused tiles?
+  // Can the path still reach the exit (from the right side) through unused
+  // tiles? A crossing counts as open while either pass is unused; turning on
+  // it is ignored here, which only makes the check more lenient.
   function exitReachable(lead, visited) {
-    let seen = visited | tileBit.get(lead);
+    const seen = new Set([lead]);
     const stack = [lead];
     while (stack.length) {
       const p = stack.pop();
@@ -455,7 +466,9 @@ function solve(L) {
           continue;
         }
         const b = tileBit.get(q);
-        if (b !== undefined && !(seen & b)) { seen |= b; stack.push(q); }
+        if (b === undefined || seen.has(q)) continue;
+        const open = cross.has(q) ? !(visited & b) || !(visited & pathBit(q, "U")) : !(visited & b);
+        if (open) { seen.add(q); stack.push(q); }
       }
     }
     return false;
@@ -505,14 +518,22 @@ function solve(L) {
     } else if (nodes % 50000 === 0) self.postMessage({ type: "progress", nodes, depth });
     if (best !== null && path.length >= best.length) break;
     if (settled(s)) {
-      const rest = finish(s, v);
-      if (rest !== null && (best === null || path.length + rest.length < best.length)) best = path + rest;
-      continue;
+      // With no crossings the rest is a plain shortest-route search. A path
+      // may need to cross itself to finish, so with crossings keep searching.
+      if (!cross.size) {
+        const rest = finish(s, v);
+        if (rest !== null && (best === null || path.length + rest.length < best.length)) best = path + rest;
+        continue;
+      }
+      if (isWin(s)) { best = path; break; }
     }
     if (s.pos[0] === E || (L.maxLen && path.length >= L.maxLen)) continue;
+    // On a crossing the path has to go straight on.
+    const heading = path ? path[path.length - 1] : startHeading;
     for (const d of DK) {
+      if (cross.has(s.pos[0]) && d !== heading) continue;
       const lead = s.pos[0] + OFF[d];
-      const b = tileBit.get(lead);
+      const b = pathBit(lead, d);
       if (b === undefined || (v & b)) continue;
       if (lead === E && exitDir && d !== exitDir) continue;
       const nxt = step(s, OFF[d]);
@@ -520,8 +541,10 @@ function solve(L) {
       if (lead === E && !settled(nxt)) continue; // the path ends on the exit
       const nv = v | b;
       if (lead !== E && !exitReachable(lead, nv)) continue;
-      let masks = seen.get(nxt.key);
-      if (!masks) { masks = []; seen.set(nxt.key, masks); }
+      // On a crossing the heading decides the next move, so it's part of the state.
+      const key = cross.has(lead) ? nxt.key + "|" + d : nxt.key;
+      let masks = seen.get(key);
+      if (!masks) { masks = []; seen.set(key, masks); }
       if (masks.some((m) => (m & nv) === m)) continue;
       masks.push(nv);
       queue.push([nxt, nv, path + d]);
@@ -574,12 +597,14 @@ const SAMPLES = [
   { name: "Hydrogen over a hole", text: "h....\n#[H#]..E\n....." },
   { name: "Electron over a hole", text: "exit=R\n.[-#].......\n[o+]..H..H.E\n.........." },
   { name: "Double charge", text: "start=R\nexit=R\n...[--#]...\n[o++]......E\n.H....H....\n..........." },
+  { name: "Crossing", text: "exit=D\n.....\n.#.#.\nh.+..\n##.#H\n##E##\n##.##" },
 ];
 
 const TOOLS = [
   { id: "floor", label: "Tile", icon: '<span class="sq"></span>' },
   { id: "void", label: "Hole", icon: '<span class="sq void"></span>' },
   { id: "exit", label: "Exit", icon: "⇥" },
+  { id: "cross", label: "Crossing", icon: "✚" },
   { sep: true },
   { id: "H", label: "H", el: true },
   { id: "O", label: "O", el: true },
@@ -631,6 +656,7 @@ function parseCell(tok, known, r, c) {
   if (tok === "#" || tok === " ") return blankCell("void");
   if (tok === ".") return blankCell();
   if (tok === "E") return blankCell("exit");
+  if (tok === "+") return blankCell("cross");
   if (tok === "-") return { ...blankCell(), e: 1 };
   if (tok.length === 1 && /[a-z]/i.test(tok) && known[tok.toUpperCase()] !== undefined)
     return { ...blankCell(), atom: { el: tok.toUpperCase(), player: tok !== tok.toUpperCase(), charge: 0 } };
@@ -687,7 +713,7 @@ function cellText(x) {
     return x.atom.charge || off ? `[${letter}${"+".repeat(x.atom.charge)}${off}]` : letter;
   }
   if (x.e) return x.e === 1 && !off ? "-" : `[${"-".repeat(x.e)}${off}]`;
-  return x.t === "void" ? "#" : x.t === "exit" ? "E" : ".";
+  return x.t === "void" ? "#" : x.t === "exit" ? "E" : x.t === "cross" ? "+" : ".";
 }
 
 function serialize(m) {
@@ -705,12 +731,13 @@ function serialize(m) {
 }
 
 function buildLevel() {
-  const tiles = [], atoms = [], electrons = [];
+  const tiles = [], atoms = [], electrons = [], crossings = [];
   let exit = null, exits = 0;
   for (let r = 0; r < M.h; r++) for (let c = 0; c < M.w; c++) {
     const x = M.cells[r * M.w + c], p = enc(r, c);
     if (x.t !== "void") tiles.push(p);
     if (x.t === "exit") { exit = p; exits++; }
+    if (x.t === "cross") crossings.push(p);
     if (x.atom) atoms.push({ ...x.atom, p, onTile: x.t !== "void" });
     if (x.e) electrons.push({ p, n: x.e });
   }
@@ -729,7 +756,7 @@ function buildLevel() {
   if (stuck) throw new Error(`A loose ${stuck.el}${stuck.charge > 1 ? stuck.charge : ""}+ has no free electrons, so it can never join the molecule and become neutral.`);
   atoms.sort((a, b) => b.player - a.player);
   return {
-    tiles, exit, electrons,
+    tiles, exit, electrons, crossings,
     pos: atoms.map((a) => a.p),
     elems: atoms.map((a) => a.el),
     valence: atoms.map((a) => valenceOf(a.el)),
@@ -798,6 +825,10 @@ function draw() {
       continue;
     }
     out.push(`<rect x="${X + 2}" y="${Y + 2}" width="${S - 4}" height="${S - 4}" rx="9" fill="var(--tile)" stroke="var(--tile-edge)"/>`);
+    if (x.t === "cross") {
+      // Two tracks through the middle: the path may use each once, straight on.
+      out.push(`<path d="M${X + 6} ${Y + S / 2 - 7} h${S - 12} M${X + 6} ${Y + S / 2 + 7} h${S - 12} M${X + S / 2 - 7} ${Y + 6} v${S - 12} M${X + S / 2 + 7} ${Y + 6} v${S - 12}" stroke="var(--tile-edge)" stroke-width="2.5" fill="none"/>`);
+    }
     if ((x.atom && !x.atom.player) || x.e) {
       out.push(`<path d="M${X + 9} ${Y + 9} l6 0 M${X + 9} ${Y + 9} l0 6" stroke="var(--tile-edge)" stroke-width="2" fill="none"/>`);
     }
@@ -919,15 +950,17 @@ function applyTool(r, c) {
     case "exit":
       M.cells.forEach((y) => { if (y.t === "exit") y.t = "floor"; });
       x.t = "exit"; x.atom = null; x.e = 0; break;
+    // Nothing starts on a crossing.
+    case "cross": x.t = "cross"; x.atom = null; x.e = 0; break;
     case "player":
       M.cells.forEach((y) => { if (y.atom) y.atom.player = false; });
       if (!x.atom) x.atom = { el: lastEl, player: true, charge: 0 }; else x.atom.player = true;
-      if (x.t === "exit") x.t = "floor";
+      if (x.t === "exit" || x.t === "cross") x.t = "floor";
       x.e = 0;
       break;
     case "electron":
       if (x.atom) return false;
-      if (x.t === "exit") x.t = "floor";
+      if (x.t === "exit" || x.t === "cross") x.t = "floor";
       x.e = Math.min(9, (x.e || 0) + 1);
       break;
     case "charge":
@@ -936,7 +969,7 @@ function applyTool(r, c) {
       break;
     case "erase": x.atom = null; x.e = 0; break;
     default: {
-      if (x.t === "exit") x.t = "floor";
+      if (x.t === "exit" || x.t === "cross") x.t = "floor";
       const keep = x.atom && x.atom.el === tool ? x.atom.charge : 0;
       x.atom = { el: tool, player: x.atom ? x.atom.player : false, charge: keep };
       x.e = 0;
@@ -1103,9 +1136,14 @@ function checkMove(d) {
   const { s, v } = stack[stack.length - 1];
   const lead = s.pos[0] + Engine.OFF[d];
   if (s.pos[0] === G.E) return { lead, reason: "" }; // the path has ended: further moves are ignored
-  const b = G.tileBit.get(lead);
+  if (G.cross.has(s.pos[0])) {
+    const heading = game.path ? game.path[game.path.length - 1] : G.startHeading;
+    if (d !== heading) return { lead, reason: "The path has to go straight on over a crossing." };
+  }
+  const b = G.pathBit(lead, d);
   if (b === undefined) return { lead, reason: "The path has to stay on level tiles." };
   if (v & b) {
+    if (G.cross.has(lead)) return { lead, reason: "The path already crosses here in that direction." };
     if (lead === L.pos[0]) return { lead, reason: "The path can't go back over the start." };
     if (L.pos.includes(lead)) return { lead, reason: "The path can't cross a tile where an atom started." };
     if (L.electrons.some((e) => e.p === lead)) return { lead, reason: "The path can't cross a tile where an electron started." };

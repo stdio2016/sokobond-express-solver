@@ -103,6 +103,9 @@ button, select, input, textarea { font: inherit; color: inherit; }
 .tool:hover, .btn:hover { border-color: var(--muted); }
 .tool[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.btn.danger { background: var(--warn); color: var(--bg); border-color: var(--warn); font-weight: 600; }
+.confirm { padding: 10px 12px; border: 1px solid var(--warn); border-radius: 8px; background: var(--bg); }
+.confirm span { flex: 1 1 100%; }
 .btn.primary:hover { filter: brightness(1.08); }
 .btn:disabled { opacity: 0.5; cursor: default; }
 button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -113,7 +116,9 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 /* The board keeps one shape; the level scales to fit inside it. The SVG is
    positioned absolutely because Safari doesn't resolve height: 100% inside an
    aspect-ratio box, which let it spill over the bottom padding. */
-#board { position: absolute; top: 12px; left: 12px; width: calc(100% - 24px); height: calc(100% - 24px); display: block; touch-action: none; user-select: none; }
+#board { position: absolute; top: 12px; left: 12px; width: calc(100% - 24px); height: calc(100% - 24px); display: block; touch-action: manipulation; user-select: none; }
+/* In try mode the one-cell margin around the level is the board's padding. */
+body[data-mode="try"] #board { top: 0; left: 0; width: 100%; height: 100%; }
 .hint { color: var(--muted); font-size: 12.5px; margin: 0; }
 .playback { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .playback input[type=range] { flex: 1 1 160px; accent-color: var(--accent); }
@@ -158,7 +163,13 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
 .trystats { display: grid; gap: 8px; flex: 1 1 240px; }
 #trycount { text-align: left; color: var(--ink); font-weight: 600; }
 .status.win { border-color: var(--accent); background: var(--accent-soft); }
-#board.won { outline: 3px solid var(--accent); outline-offset: 4px; border-radius: 6px; }
+/* Solved: the border goes on the container, which Safari repaints reliably
+   (an outline on the SVG itself only appeared after a zoom). */
+.board-wrap.won { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+/* Touches always land on the SVG itself, never on shapes inside it. Those are
+   replaced on every redraw, and a touch whose target is removed mid-press
+   never reaches the board's handlers, so the page scrolled while painting. */
+#board * { pointer-events: none; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 
@@ -221,6 +232,12 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
             <select id="sample"></select>
           </label>
           <label class="btn file-btn" for="file">Open file…<input type="file" id="file" accept=".txt,.lvl,text/plain"></label>
+          <button class="btn" id="clearAll">Clear all</button>
+        </div>
+        <div class="row confirm" id="clearConfirm" role="alertdialog" aria-label="Clear the whole board" hidden>
+          <span>Clear the whole board? Every atom, electron, crossing and the exit is removed, and all cells become tiles.</span>
+          <button class="btn danger" id="clearYes">Clear board</button>
+          <button class="btn" id="clearNo">Cancel</button>
         </div>
         <div class="row">
           <label class="field" for="w">Width <input type="number" id="w" min="1" max="24"></label>
@@ -819,10 +836,10 @@ function currentAtoms(sc) {
 function draw() {
   const svg = $("board");
   const sc = scene();
-  svg.classList.toggle("won", mode === "try" && !!game && game.won);
+  svg.parentElement.classList.toggle("won", mode === "try" && !!game && game.won);
   let r0 = 0, c0 = 0, r1 = M.h - 1, c1 = M.w - 1;
   if (sc) ({ r0, c0, r1, c1 } = sc.bounds);
-  const pad = 8;
+  const pad = mode === "try" ? 0 : 8;
   const vx = c0 * S - pad, vy = r0 * S - pad, vw = (c1 - c0 + 1) * S + pad * 2, vh = (r1 - r0 + 1) * S + pad * 2;
   svg.setAttribute("viewBox", `${vx} ${vy} ${vw} ${vh}`);
   const out = [];
@@ -971,7 +988,11 @@ function applyTool(r, c) {
     // Nothing starts on a crossing.
     case "cross": x.t = "cross"; x.atom = null; x.e = 0; break;
     case "player":
-      M.cells.forEach((y) => { if (y.atom) y.atom.player = false; });
+      M.cells.forEach((y) => {
+        if (!y.atom || y === x) return;
+        // Only the player's atom may sit on the exit, so the old one leaves with the role.
+        if (y.atom.player && y.t === "exit") y.atom = null; else y.atom.player = false;
+      });
       if (!x.atom) x.atom = { el: lastEl, player: true, charge: 0 }; else x.atom.player = true;
       if (x.t === "cross") x.t = "floor";
       x.e = 0;
@@ -985,7 +1006,10 @@ function applyTool(r, c) {
       if (!x.atom) return false;
       x.atom.charge = (x.atom.charge + 1) % (valenceOf(x.atom.el) + 1);
       break;
-    case "erase": x.atom = null; x.e = 0; break;
+    case "erase":
+      x.atom = null; x.e = 0;
+      if (x.t === "exit" || x.t === "cross") x.t = "floor";
+      break;
     default: {
       if (x.t === "cross" || (x.t === "exit" && !(x.atom && x.atom.player))) x.t = "floor";
       const keep = x.atom && x.atom.el === tool ? x.atom.charge : 0;
@@ -1325,6 +1349,16 @@ function init() {
       } catch (e) { setEditMsg(e.message); }
     }, 250);
   });
+  // Clear all asks first, on the page itself (the viewer blocks confirm()).
+  const askClear = (open) => { $("clearConfirm").hidden = !open; $("clearAll").disabled = open; if (open) $("clearNo").focus(); };
+  $("clearAll").addEventListener("click", () => askClear(true));
+  $("clearNo").addEventListener("click", () => askClear(false));
+  $("clearYes").addEventListener("click", () => {
+    askClear(false);
+    M.cells = M.cells.map(() => blankCell());
+    M.startDir = ""; M.exitDir = "";
+    modelChanged();
+  });
   $("w").addEventListener("change", () => resize(+$("w").value, M.h));
   $("h").addEventListener("change", () => resize(M.w, +$("h").value));
   $("startDir").addEventListener("change", (e) => { M.startDir = e.target.value; modelChanged(); });
@@ -1332,8 +1366,15 @@ function init() {
 
   const board = $("board");
   let painting = false;
+  // Only presses that start inside the level grid paint or draw the path; the
+  // margins and Solve mode leave touches to scroll the page.
+  const inGrid = (e) => { const [r, c] = cellAt(e); return r >= 0 && c >= 0 && r < M.h && c < M.w; };
+  const boardActive = (e) => mode === "edit" || (mode === "try" && game) ? inGrid(e) : false;
+  board.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 1 && boardActive(e.touches[0])) e.preventDefault();
+  }, { passive: false });
   board.addEventListener("pointerdown", (e) => {
-    if (mode === "solve" || (mode === "try" && !game)) return;
+    if (!boardActive(e)) return;
     painting = true;
     board.setPointerCapture(e.pointerId);
     if (mode === "try") { tryPointer(e); return; }

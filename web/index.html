@@ -472,31 +472,65 @@ function makeEngine(L) {
 }
 
 function solve(L) {
-  const { n, E, tiles, tileBit, cross, pathBit, exitDir, settled, blockedCells, step, canFinish, ended, isWin, start, visited0, startError, startHeading } = makeEngine(L);
+  const { n, E, tiles, cross, exitDir, settled, blockedCells, step, canFinish, ended, isWin, start, visited0, startError, startHeading } = makeEngine(L);
   if (startError) return { type: "blocked", message: startError };
 
-  // Can the path still reach the exit (from the right side) through unused
-  // tiles? A crossing counts as open while either pass is unused; turning on
-  // it is ignored here, which only makes the check more lenient.
-  function exitReachable(lead, visited) {
-    const seen = new Set([lead]);
-    const stack = [lead];
-    while (stack.length) {
-      const p = stack.pop();
-      for (const d of DK) {
-        const q = p + OFF[d];
-        if (q === E) {
-          if (!exitDir || d === exitDir) return true;
-          continue;
-        }
-        const b = tileBit.get(q);
-        if (b === undefined || seen.has(q)) continue;
-        const open = cross.has(q) ? !(visited & b) || !(visited & pathBit(q, "U")) : !(visited & b);
-        if (open) { seen.add(q); stack.push(q); }
+  // The solver tracks the tiles the path has used as arrays of 32-bit words
+  // (bit k = tile k; a crossing has a second bit for its vertical pass). They
+  // are much faster than BigInt here, especially in Safari.
+  const T = L.tiles.length;
+  const tileIdx = new Map(L.tiles.map((p, k) => [p, k]));
+  const crossIdx = new Map(L.crossings.map((p, j) => [p, T + j]));
+  const W = Math.ceil((T + L.crossings.length) / 32) || 1;
+  const has = (v, k) => (v[k >> 5] & (1 << (k & 31))) !== 0;
+  const pathIdx = (p, d) => (d === "U" || d === "D") && cross.has(p) ? crossIdx.get(p) : tileIdx.get(p);
+  const words0 = new Int32Array(W);
+  for (let k = 0; k < T + L.crossings.length; k++) if ((visited0 >> BigInt(k)) & 1n) words0[k >> 5] |= 1 << (k & 31);
+
+  // Neighbours of each tile, by direction: a tile index, -1 for none, -2 for the exit.
+  const nbr = new Int32Array(T * 4).fill(-1);
+  const crossV = new Int32Array(T).fill(-1);
+  L.tiles.forEach((p, k) => {
+    DK.forEach((d, j) => {
+      const q = p + OFF[d];
+      if (q === E) nbr[k * 4 + j] = -2;
+      else if (tileIdx.has(q)) nbr[k * 4 + j] = tileIdx.get(q);
+    });
+    if (cross.has(p)) crossV[k] = crossIdx.get(p);
+  });
+  const exitOk = DK.map((d) => !exitDir || d === exitDir);
+  const mark = new Int32Array(T), stack = new Int32Array(T);
+  let stamp = 0;
+
+  // The free region: unused path bits on tiles still reachable from the lead
+  // through unused tiles (a crossing is open while either pass is unused).
+  // Used tiles outside it can never matter again, so the search compares
+  // arrivals by this region rather than by every tile used so far. Returns
+  // null when the exit (entered from the right side) can't be reached.
+  function freeRegion(lead, v) {
+    const free = new Int32Array(W);
+    let found = false, sp = 0;
+    stamp++;
+    const k0 = tileIdx.get(lead);
+    mark[k0] = stamp; stack[sp++] = k0;
+    while (sp) {
+      const k = stack[--sp];
+      for (let j = 0; j < 4; j++) {
+        const t = nbr[k * 4 + j];
+        if (t === -1) continue;
+        if (t === -2) { if (exitOk[j]) found = true; continue; }
+        if (mark[t] === stamp) continue;
+        let open = false;
+        if (!has(v, t)) { free[t >> 5] |= 1 << (t & 31); open = true; }
+        const c = crossV[t];
+        if (c >= 0 && !has(v, c)) { free[c >> 5] |= 1 << (c & 31); open = true; }
+        if (open) { mark[t] = stamp; stack[sp++] = t; }
       }
     }
-    return false;
+    return found ? free : null;
   }
+  const ENDED = new Int32Array(W); // a path that has reached the exit has nothing left
+  const within = (a, b) => { for (let i = 0; i < W; i++) if ((a[i] & b[i]) !== a[i]) return false; return true; };
 
   // Shortest route to the exit once nothing can change any more (every atom
   // settled, so the molecule's shape is fixed).
@@ -520,11 +554,11 @@ function solve(L) {
       const p = queue[h];
       for (const d of DK) {
         const q = p + OFF[d];
-        const b = tileBit.get(q);
-        if (b === undefined || !fits(q)) continue;
+        const k = tileIdx.get(q);
+        if (k === undefined || !fits(q)) continue;
         // Reaching the exit ends the path (in a loop the exit is where it began).
         if (q === E) { if (!exitDir || d === exitDir) return route(p, d); continue; }
-        if ((visited & b) || prev.has(q)) continue;
+        if (has(visited, k) || prev.has(q)) continue;
         prev.set(q, [p, d]);
         queue.push(q);
       }
@@ -532,8 +566,11 @@ function solve(L) {
     return null;
   }
 
-  const seen = new Map([[start.key, [visited0]]]);
-  const queue = [[start, visited0, ""]];
+  // For each board state, the free regions it has been reached with. BFS
+  // reaches it first by the shortest paths, so a later arrival whose free
+  // region fits inside an earlier one can't do better and is dropped.
+  const seen = new Map();
+  const queue = [[start, words0, ""]];
   let best = null, nodes = 0, depth = 0;
   for (let h = 0; h < queue.length; h++) {
     const [s, v, path] = queue[h];
@@ -560,20 +597,26 @@ function solve(L) {
     for (const d of DK) {
       if (cross.has(s.pos[0]) && d !== heading) continue;
       const lead = s.pos[0] + OFF[d];
-      const b = pathBit(lead, d);
-      if (b === undefined || (v & b)) continue;
+      const k = pathIdx(lead, d);
+      if (k === undefined || has(v, k)) continue;
       if (lead === E && exitDir && d !== exitDir) continue;
       const nxt = step(s, OFF[d]);
       if (!nxt || !canFinish(nxt)) continue;
       if (lead === E && !settled(nxt)) continue; // the path ends on the exit
-      const nv = v | b;
-      if (lead !== E && !exitReachable(lead, nv)) continue;
+      const nv = v.slice();
+      nv[k >> 5] |= 1 << (k & 31);
+      const free = lead === E ? ENDED : freeRegion(lead, nv);
+      if (!free) continue;
       // On a crossing the heading decides the next move, so it's part of the state.
       const key = cross.has(lead) ? nxt.key + "|" + d : nxt.key;
       let masks = seen.get(key);
       if (!masks) { masks = []; seen.set(key, masks); }
-      if (masks.some((m) => (m & nv) === m)) continue;
-      masks.push(nv);
+      if (masks.some((m) => within(free, m))) continue;
+      // Earlier regions inside this one can't rule out anything it doesn't.
+      let w = 0;
+      for (let i = 0; i < masks.length; i++) if (!within(masks[i], free)) masks[w++] = masks[i];
+      masks.length = w;
+      masks.push(free);
       queue.push([nxt, nv, path + d]);
     }
   }

@@ -112,10 +112,11 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 .swatch { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
 .sq { width: 14px; height: 14px; border-radius: 3px; display: inline-block; background: var(--tile); border: 1px solid var(--tile-edge); }
 .sq.void { background: transparent; border: 1px dashed var(--void); }
-.board-wrap { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); aspect-ratio: 1 / 1; max-width: 100%; }
-/* The board keeps one shape; the level scales to fit inside it. The SVG is
-   positioned absolutely because Safari doesn't resolve height: 100% inside an
-   aspect-ratio box, which let it spill over the bottom padding. */
+.board-wrap { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); height: 0; padding-bottom: 100%; }
+/* The board keeps one square shape and the level scales to fit inside it.
+   The square comes from padding-bottom (a percentage of the width), not
+   aspect-ratio, which Safari didn't recompute inside the grid on window
+   resize. The SVG is positioned absolutely inside it. */
 #board { position: absolute; top: 12px; left: 12px; width: calc(100% - 24px); height: calc(100% - 24px); display: block; touch-action: manipulation; user-select: none; }
 /* In try mode the one-cell margin around the level is the board's padding. */
 body[data-mode="try"] #board { top: 0; left: 0; width: 100%; height: 100%; }
@@ -211,6 +212,9 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
           </div>
         </div>
       </div>
+    </section>
+
+    <aside class="side">
       <div class="panel solve-only" id="result-panel" hidden>
         <div class="playback">
           <button class="btn" id="first" title="First step (Home)">⏮</button>
@@ -222,9 +226,6 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
         </div>
         <div class="moves" id="moves"></div>
       </div>
-    </section>
-
-    <aside class="side">
       <div class="panel edit-only">
         <h2>Level</h2>
         <div class="row">
@@ -853,8 +854,8 @@ function tri(cx, cy, dir, size) {
 
 // What the board shows: the try-mode game, a solution being played back, or (null) the editor.
 function scene() {
-  if (mode === "try" && game) return { frames: game.states, cur: game.states.length - 1, elems: game.L.elems, electrons: game.L.electrons, bounds: game.bounds, origin: game.G.origin, ghost: false };
-  if (mode === "solve" && sol) return { frames: sol.frames, cur, elems: sol.elems, electrons: sol.electrons, bounds: sol.bounds, origin: sol.origin, ghost: true };
+  if (mode === "try" && game) return { frames: game.states, cur: game.states.length - 1, elems: game.L.elems, electrons: game.L.electrons, init: game.L.pos, bounds: game.bounds, origin: game.G.origin, ghost: false };
+  if (mode === "solve" && sol) return { frames: sol.frames, cur, elems: sol.elems, electrons: sol.electrons, init: sol.init, bounds: sol.bounds, origin: sol.origin, ghost: true };
   return null;
 }
 
@@ -957,8 +958,8 @@ function draw() {
   const { atoms, bonds, electrons } = currentAtoms(sc);
   const R = S * 0.3;
   for (const e of electrons) {
-    // In try mode captured electrons stay behind in grey; elsewhere only the ones left show.
-    const shown = mode === "try" ? e.init : e.n;
+    // While playing or replaying, captured electrons stay behind in grey.
+    const shown = sc ? e.init : e.n;
     if (!shown) continue;
     const cx = e.c * S + S / 2, cy = e.r * S + S / 2;
     const offLevel = sc && !isTile(e.r, e.c);
@@ -973,11 +974,11 @@ function draw() {
     if (shown > 4) out.push(`<text x="${cx}" y="${cy + 4}" text-anchor="middle" font-family="Lexend, system-ui, sans-serif" font-weight="700" font-size="12" fill="var(--ink)">${e.n === shown ? e.n : `${e.n}/${shown}`}</text>`);
     out.push("</g>");
   }
-  // try mode: a grey ghost stays on the tile where each moved atom started
-  if (mode === "try" && game) {
-    game.L.pos.forEach((p, i) => {
+  // While playing or replaying, a grey ghost stays where each moved atom started.
+  if (sc) {
+    sc.init.forEach((p, i) => {
       if (atoms[i] && enc(atoms[i].r, atoms[i].c) === p) return;
-      const [r, c] = dec(p), cx = c * S + S / 2, cy = r * S + S / 2, el = game.L.elems[i];
+      const [r, c] = dec(p), cx = c * S + S / 2, cy = r * S + S / 2, el = sc.elems[i];
       out.push(`<circle cx="${cx}" cy="${cy}" r="${R}" fill="var(--used)"/>`);
       out.push(`<text x="${cx}" y="${cy + 5.5}" text-anchor="middle" font-family="Lexend, system-ui, sans-serif" font-weight="700" font-size="16" fill="var(--used-ink)">${i === 0 ? el.toLowerCase() : el}</text>`);
     });
@@ -1156,7 +1157,7 @@ function showSolution(L, data, secs) {
     const [r, c] = dec(p);
     r0 = Math.min(r0, r); c0 = Math.min(c0, c); r1 = Math.max(r1, r); c1 = Math.max(c1, c);
   }
-  sol = { path: data.path, frames: data.frames, elems: L.elems, electrons: L.electrons, origin: L.pos[0], bounds: { r0, c0, r1, c1 } };
+  sol = { path: data.path, frames: data.frames, elems: L.elems, electrons: L.electrons, init: L.pos, origin: L.pos[0], bounds: { r0, c0, r1, c1 } };
   cur = 0;
   const arrows = [...data.path].map((d) => ARROW[d]).join("");
   setStatus(`<b>Solved in ${data.path.length} moves</b> (${data.nodes.toLocaleString()} states, ${secs}s)<div class="solution">${data.path}<br>${arrows}</div>`, "ok");

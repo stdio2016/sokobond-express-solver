@@ -51,6 +51,10 @@ is one less free electron. An ion is not neutral until its charge is gone.
 * Electrons sit on cells; several can share one cell. When a molecule ion ends
 a step next to a cell holding electrons, it captures one electron from that
 cell (one per cell it touches), losing one charge and gaining one free electron.
-Whether the ambiguity rule applies to electron capture is still unknown; for now
-it doesn't.
+Capture has its own ambiguity check, worked out like bonding's but separately
+from it: a cell touching more molecule ions than it holds electrons is
+ambiguous, and so is an ion touching more electron cells than its charge.
+Anything that could capture from, or be captured by, an ambiguous ion or cell is
+ambiguous too (this spreads). The other ions each capture one electron from
+every cell they touch, all at the same time.
 * Some atoms and electrons start on holes instead of level tiles.

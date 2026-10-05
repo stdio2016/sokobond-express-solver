@@ -334,14 +334,36 @@ function makeEngine(L) {
   function resolve(pos, mol, bonds, free, charge, elec) {
     free = free.slice(); charge = charge.slice(); elec = elec.slice();
 
-    // Capture: a molecule ion takes one electron from each neighbouring cell holding any.
+    // Capture, with its own ambiguity check (separate from bonding's). A
+    // molecule ion and a neighbouring cell holding electrons are partners. An
+    // ion with more partner cells than charge, or a cell with more partner
+    // ions than electrons, is ambiguous, and so is anything partnered with an
+    // ambiguous ion or cell (this spreads). Every other ion captures one
+    // electron from each partner cell, all at the same time.
+    const ionCells = new Map(), cellIons = new Map();
     for (let i = 0; i < n; i++) {
-      if (!(mol >> i & 1)) continue;
+      if (!(mol >> i & 1) || !charge[i]) continue;
       for (const d of DK) {
-        if (!charge[i]) break;
         const k = ecell.get(pos[i] + OFF[d]);
         if (k === undefined || !elec[k]) continue;
-        elec[k]--; charge[i]--; free[i]++;
+        if (!ionCells.has(i)) ionCells.set(i, []);
+        ionCells.get(i).push(k);
+        if (!cellIons.has(k)) cellIons.set(k, []);
+        cellIons.get(k).push(i);
+      }
+    }
+    if (ionCells.size) {
+      const ambIon = new Set(), ambCell = new Set(), spread = [];
+      for (const [i, ks] of ionCells) if (ks.length > charge[i]) { ambIon.add(i); spread.push(["ion", i]); }
+      for (const [k, is] of cellIons) if (is.length > elec[k]) { ambCell.add(k); spread.push(["cell", k]); }
+      while (spread.length) {
+        const [kind, x] = spread.pop();
+        if (kind === "ion") { for (const k of ionCells.get(x)) if (!ambCell.has(k)) { ambCell.add(k); spread.push(["cell", k]); } }
+        else { for (const i of cellIons.get(x)) if (!ambIon.has(i)) { ambIon.add(i); spread.push(["ion", i]); } }
+      }
+      for (const [i, ks] of ionCells) {
+        if (ambIon.has(i)) continue;
+        for (const k of ks) { elec[k]--; charge[i]--; free[i]++; }
       }
     }
 
@@ -844,12 +866,12 @@ function buildLevel() {
 }
 
 /* ---------- drawing ---------- */
-function tri(cx, cy, dir, size) {
-  const [dr, dc] = DIRV[dir];
-  const tip = [cx + dc * size, cy + dr * size];
-  const b1 = [cx - dc * size * 0.6 + dr * size * 0.8, cy - dr * size * 0.6 + dc * size * 0.8];
-  const b2 = [cx - dc * size * 0.6 - dr * size * 0.8, cy - dr * size * 0.6 - dc * size * 0.8];
-  return `${tip[0]},${tip[1]} ${b1[0]},${b1[1]} ${b2[0]},${b2[1]}`;
+// A thick arrow in the path colour from (x1, y1) to its tip at (x2, y2).
+function arrow(x1, y1, x2, y2) {
+  const len = Math.hypot(x2 - x1, y2 - y1), ux = (x2 - x1) / len, uy = (y2 - y1) / len, head = 12, half = 9;
+  const bx = x2 - ux * head, by = y2 - uy * head;
+  return `<g opacity="0.85"><line x1="${x1}" y1="${y1}" x2="${bx}" y2="${by}" stroke="var(--accent)" stroke-width="6" stroke-linecap="round"/>` +
+    `<polygon points="${x2},${y2} ${bx - uy * half},${by + ux * half} ${bx + uy * half},${by - ux * half}" fill="var(--accent)"/></g>`;
 }
 
 // What the board shows: the try-mode game, a solution being played back, or (null) the editor.
@@ -917,8 +939,9 @@ function draw() {
     out.push(`<rect x="${X + 2}" y="${Y + 2}" width="${S - 4}" height="${S - 4}" rx="9" fill="var(--ink)"/>`);
     out.push(`<rect x="${X + 10}" y="${Y + 10}" width="${S - 20}" height="${S - 20}" rx="5" fill="none" stroke="var(--bg)" stroke-width="2"/>`);
     if (M.exitDir) {
-      const [dr, dc] = DIRV[M.exitDir];
-      out.push(`<polygon points="${tri(X + S / 2 - dc * S * 0.36, Y + S / 2 - dr * S * 0.36, M.exitDir, 6)}" fill="var(--accent)"/>`);
+      // An arrow from the previous cell into the exit.
+      const [dr, dc] = DIRV[M.exitDir], cx = X + S / 2, cy = Y + S / 2;
+      out.push(arrow(cx - dc * S, cy - dr * S, cx - dc * S * 0.3, cy - dr * S * 0.3));
     } else {
       out.push(`<circle cx="${X + S / 2}" cy="${Y + S / 2}" r="4" fill="var(--bg)"/>`);
     }
@@ -928,8 +951,9 @@ function draw() {
     const [r, c] = startCell, X = c * S, Y = r * S;
     out.push(`<rect x="${X + 7}" y="${Y + 7}" width="${S - 14}" height="${S - 14}" rx="7" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="4 3"/>`);
     if (M.startDir) {
-      const [dr, dc] = DIRV[M.startDir];
-      out.push(`<polygon points="${tri(X + S / 2 + dc * S * 0.4, Y + S / 2 + dr * S * 0.4, M.startDir, 6)}" fill="var(--accent)"/>`);
+      // An arrow from the start into the next cell.
+      const [dr, dc] = DIRV[M.startDir], cx = X + S / 2, cy = Y + S / 2;
+      out.push(arrow(cx + dc * S * 0.3, cy + dr * S * 0.3, cx + dc * S * 0.95, cy + dr * S * 0.95));
     }
   }
 
@@ -999,7 +1023,9 @@ function draw() {
     const cx = a.c * S + S / 2, cy = a.r * S + S / 2;
     const offLevel = sc && !isTile(a.r, a.c);
     out.push(`<g${offLevel ? ' opacity="0.55"' : ""}>`);
-    out.push(`<circle cx="${cx}" cy="${cy}" r="${R}" fill="${colorOf(a.el)}"${a.mol ? ' stroke="var(--ink)" stroke-width="3"' : ""}/>`);
+    // The player's atom is ringed in the path colour, other molecule atoms in ink.
+    const ring = a.player ? "var(--accent)" : a.mol ? "var(--ink)" : "";
+    out.push(`<circle cx="${cx}" cy="${cy}" r="${R}" fill="${colorOf(a.el)}"${ring ? ` stroke="${ring}" stroke-width="3"` : ""}/>`);
     const sup = a.charge ? `<tspan font-size="11" dy="-6">${a.charge > 1 ? a.charge : ""}+</tspan>` : "";
     out.push(`<text x="${cx}" y="${cy + 5.5}" text-anchor="middle" font-family="Lexend, system-ui, sans-serif" font-weight="700" font-size="16" fill="var(--atom-text)">${a.player ? a.el.toLowerCase() : a.el}${sup}</text>`);
     for (let e = 0; e < a.free; e++) {

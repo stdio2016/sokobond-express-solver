@@ -26,6 +26,7 @@
   --atom-text: #ffffff;
   --used: #b3bdc7;
   --electron: #b8338f;
+  --p0: #0d7a70; --p1: #c2561a; --p2: #7a4fc9; --p3: #1f84b5;
   --used-ink: #f5f7f9;
   --radius: 10px;
   --font: "Lexend", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -53,6 +54,7 @@
     --x: #9a83e3;
   --used: #3b4652;
   --electron: #e065bd;
+  --p0: #33c2b3; --p1: #f08a4b; --p2: #a98af0; --p3: #5bb8e6;
   --used-ink: #8e9aa6;
   }
 }
@@ -77,6 +79,7 @@
   --x: #9a83e3;
   --used: #3b4652;
   --electron: #e065bd;
+  --p0: #33c2b3; --p1: #f08a4b; --p2: #a98af0; --p3: #5bb8e6;
   --used-ink: #8e9aa6;
 }
 * { box-sizing: border-box; }
@@ -163,6 +166,12 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
 .dpad .btn { justify-content: center; font-size: 18px; padding: 0; }
 .trystats { display: grid; gap: 8px; flex: 1 1 240px; }
 #trycount { text-align: left; color: var(--ink); font-weight: 600; }
+.molsel .btn[aria-pressed="true"] { color: var(--bg); border-color: transparent; font-weight: 600; }
+.molsel .btn .swatch { width: 12px; height: 12px; }
+.pathrows { display: grid; gap: 6px; }
+.pathrow { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.pathrow .swatch { margin-right: 4px; }
+.move.auto { opacity: 0.55; }
 .status.win { border-color: var(--accent); background: var(--accent-soft); }
 /* Solved: the border goes on the container, which Safari repaints reliably
    (an outline on the SVG itself only appeared after a zoom). */
@@ -194,6 +203,7 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
       <p class="hint edit-only" id="hint">Click or drag on the board to paint with the selected tool.</p>
       <div class="panel try-only" id="trypanel">
         <div class="status" id="trymsg" role="status"></div>
+        <div class="row molsel" id="molsel" role="group" aria-label="Path to draw" hidden></div>
         <div class="tryrow">
           <div class="dpad" aria-label="Move">
             <button class="btn" data-dir="U" style="grid-area:u" aria-label="Up">↑</button>
@@ -208,7 +218,7 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
               <button class="btn" id="undo">Undo</button>
               <button class="btn" id="restart">Restart</button>
             </div>
-            <p class="hint">Drag from your atom or use the arrow keys (or WASD). Step back onto the path or press Z to undo, R restarts, Esc returns to Edit.</p>
+            <p class="hint">Drag from your atom or use the arrow keys (or WASD). With several starts, press a path's end, its button, 1–4 or Tab to choose which one to draw. Step back onto a path or press Z to undo, R restarts, Esc returns to Edit.</p>
           </div>
         </div>
       </div>
@@ -243,12 +253,6 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
         <div class="row">
           <label class="field" for="w">Width <input type="number" id="w" min="1" max="24"></label>
           <label class="field" for="h">Height <input type="number" id="h" min="1" max="24"></label>
-          <label class="field" for="startDir">Start leaves
-            <select id="startDir"><option value="">any way</option><option value="U">↑ up</option><option value="D">↓ down</option><option value="L">← left</option><option value="R">→ right</option></select>
-          </label>
-          <label class="field" for="exitDir">Exit entered
-            <select id="exitDir"><option value="">any way</option><option value="U">↑ up</option><option value="D">↓ down</option><option value="L">← left</option><option value="R">→ right</option></select>
-          </label>
         </div>
         <label class="field" for="text">Level text
           <textarea id="text" spellcheck="false" autocomplete="off"></textarea>
@@ -262,13 +266,15 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
             <dt># or space</dt><dd>outside the level</dd>
             <dt>H O N C</dt><dd>loose atoms with 1–4 electrons</dd>
             <dt>h o n c</dt><dd>the player's atom</dd>
-            <dt>start=R</dt><dd>the start leads right (U D L R); that first step is taken automatically</dd>
-            <dt>exit=D</dt><dd>last move must go down into the exit</dd>
+            <dt>start=R</dt><dd>starts lead right (U D L R); that first step is taken automatically</dd>
+            <dt>exit=D</dt><dd>last move must go down into an exit</dd>
+            <dt>[o&gt;] [E^]</dt><dd>one start's or exit's own direction: ^ v &lt; &gt;</dd>
             <dt>-</dt><dd>one electron on a tile</dd>
             <dt>[O+] [n++]</dt><dd>an ion: one + per charge (one less free electron each)</dd>
             <dt>[--]</dt><dd>several electrons in one cell</dd>
             <dt>[H#] [-#]</dt><dd># inside brackets: starts on a hole, not a tile</dd>
-            <dt>[oE]</dt><dd>the player's atom starts on the exit: the path is a loop</dd>
+            <dt>[oE]</dt><dd>a start on an exit: its path can be a loop</dd>
+            <dt>h o n c</dt><dd>up to 4 starts (lowercase atoms), each with its own molecule, and as many exits</dd>
             <dt>valence: X=2</dt><dd>add a new element</dd>
           </dl>
         </details>
@@ -278,7 +284,7 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
       <div class="panel solve-only">
         <h2>Solve</h2>
         <div class="row">
-          <label class="field" for="maxLen">Max moves (0 = none) <input type="number" id="maxLen" min="0" value="0"></label>
+          <label class="field" for="maxLen">Max time steps (0 = none) <input type="number" id="maxLen" min="0" value="0"></label>
           <label class="field" for="limit">State limit <input type="number" id="limit" min="10000" step="100000" value="3000000" style="width:110px"></label>
         </div>
         <div class="row">
@@ -298,10 +304,22 @@ const Engine = (() => {
 const STRIDE = 1024;
 const OFF = { U: -STRIDE, D: STRIDE, L: -1, R: 1 };
 const DK = ["U", "D", "L", "R"];
+const OPP = { U: "D", D: "U", L: "R", R: "L" };
 
+// A level has 1-4 starts, each with its own molecule (atoms 0..P-1 are the
+// players, atom m leads molecule m), and as many exits. Each start draws its
+// own path to an exit of its choice. Time runs in steps: every molecule that
+// is not reacting moves one step along its path at the same time; then
+// capture and bonding happen; a molecule that captured or bonded spends the
+// next step reacting and does not move. A molecule whose path reached an exit
+// stays there.
 function makeEngine(L) {
   const n = L.pos.length;
-  const E = L.exit;
+  const P = L.players;
+  const multi = P > 1;
+  const ALL = (1 << P) - 1;
+  const exits = L.exits;
+  const exitIdx = new Map(exits.map((p, k) => [p, k]));
   const tileBit = new Map();
   L.tiles.forEach((p, k) => tileBit.set(p, 1n << BigInt(k)));
   // A crossing can be passed once horizontally and once vertically, so it has
@@ -310,29 +328,33 @@ function makeEngine(L) {
   const crossV = new Map(L.crossings.map((p, k) => [p, 1n << BigInt(L.tiles.length + k)]));
   const pathBit = (p, d) => (d === "U" || d === "D") && cross.has(p) ? crossV.get(p) : tileBit.get(p);
   const tiles = new Set(L.tiles);
-  const { startDir, exitDir } = L;
   // Electron cells: code -> index into a state's electron counts.
   const ecell = new Map();
   L.electrons.forEach((e, k) => ecell.set(e.p, k));
 
-  const sumMol = (s, arr, inMol) => { let t = 0; for (let i = 0; i < n; i++) if (!!(s.mol >> i & 1) === inMol) t += arr[i]; return t; };
-  const need = (s) => sumMol(s, s.free, true);          // free electrons on the molecule
-  const looseFree = (s) => sumMol(s, s.free, false);    // free electrons on loose atoms
-  const molCharge = (s) => sumMol(s, s.charge, true);
-  const looseCharge = (s) => sumMol(s, s.charge, false);
+  const sumIf = (s, arr, inMol) => { let t = 0; for (let i = 0; i < n; i++) if ((s.mid[i] >= 0) === inMol) t += arr[i]; return t; };
+  const need = (s) => sumIf(s, s.free, true);          // free electrons on molecules
+  const looseFree = (s) => sumIf(s, s.free, false);    // free electrons on loose atoms
+  const molCharge = (s) => sumIf(s, s.charge, true);
+  const looseCharge = (s) => sumIf(s, s.charge, false);
   const electronsLeft = (s) => s.elec.reduce((a, b) => a + b, 0);
   const pairKey = (i, j) => i < j ? i * 64 + j : j * 64 + i;
+  const sameArr = (a, b) => a.every((x, i) => x === b[i]);
   // Which pairs are bonded matters for later bonding (an existing bond never
-  // grows), so the bonded pairs are part of the state's identity.
-  const mk = (pos, mol, bonds, free, charge, elec) => ({
-    pos, mol, bonds, free, charge, elec,
-    key: pos.join(",") + "|" + mol + "|" + free.join(",") + "|" + charge.join(",") + "|" + elec.join(",") + "|" +
-      [...new Set(bonds.map(([i, j]) => pairKey(i, j)))].sort((a, b) => a - b).join(","),
+  // grows), so the bonded pairs are part of the state's identity, as are the
+  // reacting (paused) and finished (done) molecules.
+  const mk = (pos, mid, bonds, free, charge, elec, paused, done) => ({
+    pos, mid, bonds, free, charge, elec, paused, done,
+    key: pos.join(",") + "|" + mid.join(",") + "|" + free.join(",") + "|" + charge.join(",") + "|" + elec.join(",") + "|" +
+      paused + "|" + done + "|" + [...new Set(bonds.map(([i, j]) => pairKey(i, j)))].sort((a, b) => a - b).join(","),
   });
 
-  // After a step, first molecule ions capture electrons, then bonds form.
-  function resolve(pos, mol, bonds, free, charge, elec) {
-    free = free.slice(); charge = charge.slice(); elec = elec.slice();
+  // Capture, then bonding. `moved` is the set of molecules that just moved:
+  // only they touch new electron cells. Returns the new atoms and the set of
+  // molecules that reacted.
+  function react(pos, mid, bonds, free, charge, elec, moved) {
+    mid = mid.slice(); free = free.slice(); charge = charge.slice(); elec = elec.slice();
+    let reacted = 0;
 
     // Capture, with its own ambiguity check (separate from bonding's). A
     // molecule ion and a neighbouring cell holding electrons are partners. An
@@ -342,7 +364,7 @@ function makeEngine(L) {
     // electron from each partner cell, all at the same time.
     const ionCells = new Map(), cellIons = new Map();
     for (let i = 0; i < n; i++) {
-      if (!(mol >> i & 1) || !charge[i]) continue;
+      if (mid[i] < 0 || !(moved >> mid[i] & 1) || !charge[i]) continue;
       for (const d of DK) {
         const k = ecell.get(pos[i] + OFF[d]);
         if (k === undefined || !elec[k]) continue;
@@ -364,24 +386,27 @@ function makeEngine(L) {
       for (const [i, ks] of ionCells) {
         if (ambIon.has(i)) continue;
         for (const k of ks) { elec[k]--; charge[i]--; free[i]++; }
+        reacted |= 1 << mid[i];
       }
     }
 
     // Bonding, in phases of rounds. A pair can bond when both atoms are
-    // adjacent and free (have free electrons), at least one was in the molecule
-    // when the phase began, and they weren't bonded before this step (existing
-    // bonds never change multiplicity). An atom with more such partners than
-    // free electrons is ambiguous, and so is anything that could bond with an
-    // ambiguous atom. Every other atom bonds once with each partner, all at the
-    // same time. Rounds repeat within the phase until no bond forms, which
-    // builds double/triple/quadruple bonds. Loose atoms that bonded join the
-    // molecule, and only then does a new phase let them bond outward (chain
-    // reaction). Phases repeat until the molecule stops growing.
+    // adjacent and free (have free electrons), they weren't bonded before this
+    // step (existing bonds never change multiplicity), and either one was in a
+    // molecule when the phase began and the other was loose, or both were in
+    // the same molecule (closing a ring). Two molecules never bond: a loose
+    // atom that bonded to a molecule earlier in the phase stays with it, and a
+    // loose atom whose partners belong to two molecules is ambiguous. An atom
+    // with more partners than free electrons is ambiguous too, and so is
+    // anything that could bond with an ambiguous atom. Every other atom bonds
+    // once with each partner, all at the same time. Rounds repeat within the
+    // phase until no bond forms (building double/triple/quadruple bonds);
+    // then atoms that joined may bond outward in a new phase (chain reaction).
     const at = new Map();
     pos.forEach((p, i) => at.set(p, i));
     const before = new Set(bonds.map(([i, j]) => pairKey(i, j)));
     let bondsCopied = false;
-    let phaseMol = mol;
+    let phaseMid = mid.slice();
     for (;;) {
       const partners = [];
       for (let i = 0; i < n; i++) {
@@ -390,13 +415,18 @@ function makeEngine(L) {
           for (const d of DK) {
             const j = at.get(pos[i] + OFF[d]);
             if (j === undefined || !free[j] || before.has(pairKey(i, j))) continue;
-            if (!(phaseMol >> i & 1) && !(phaseMol >> j & 1)) continue; // loose atoms only bond with the molecule
+            const a = phaseMid[i], b = phaseMid[j];
+            if (a < 0 && b < 0) continue;                  // loose atoms only bond with a molecule
+            if (a >= 0 && b >= 0 && a !== b) continue;     // molecules never bond with each other
+            if (a < 0 && mid[i] >= 0 && mid[i] !== b) continue;
+            if (b < 0 && mid[j] >= 0 && mid[j] !== a) continue;
             list.push(j);
           }
         }
         partners.push(list);
       }
-      const ambiguous = partners.map((list, i) => list.length > free[i]);
+      const ambiguous = partners.map((list, i) =>
+        list.length > free[i] || (phaseMid[i] < 0 && new Set(list.map((j) => phaseMid[j])).size > 1));
       const spread = [];
       ambiguous.forEach((a, i) => { if (a) spread.push(i); });
       while (spread.length) {
@@ -408,97 +438,169 @@ function makeEngine(L) {
         for (const j of partners[i]) if (i < j) formed.push([i, j]);
       }
       if (!formed.length) {
-        if (mol === phaseMol) break;  // nothing joined: done
-        phaseMol = mol;               // newly joined atoms may now bond outward
+        if (sameArr(mid, phaseMid)) break;  // nothing joined: done
+        phaseMid = mid.slice();             // newly joined atoms may now bond outward
         continue;
       }
       if (!bondsCopied) { bonds = bonds.slice(); bondsCopied = true; }
       for (const [i, j] of formed) {
         bonds.push([i, j]);
         free[i]--; free[j]--;
-        mol |= (1 << i) | (1 << j);
+        const m = phaseMid[i] >= 0 ? phaseMid[i] : phaseMid[j];
+        mid[i] = mid[j] = m;
+        reacted |= 1 << m;
       }
     }
-    return mk(pos, mol, bonds, free, charge, elec);
+    return { mid, bonds, free, charge, elec, reacted };
   }
 
-  // Cells the molecule can't move into: loose atoms and cells holding electrons.
+  // Cells a molecule can't move into while standing still things occupy them.
   function blockedCells(s) {
     const occ = new Set();
-    for (let i = 0; i < n; i++) if (!(s.mol >> i & 1)) occ.add(s.pos[i]);
+    for (let i = 0; i < n; i++) if (s.mid[i] < 0) occ.add(s.pos[i]);
     L.electrons.forEach((e, k) => { if (s.elec[k]) occ.add(e.p); });
     return occ;
   }
 
-  function step(s, off) {
-    const occ = blockedCells(s);
-    const pos = s.pos.slice();
+  // One time step: dirs[m] is molecule m's move ("U".."R") or null to stay.
+  // Atoms can't move into anything standing still, and two atoms can't end in
+  // the same cell. Between moving molecules, the rest depends on directions:
+  // the same direction never collides; opposite directions are checked as if
+  // movement were continuous, so they can't swap places; perpendicular moves
+  // only compare the cells before and after, so moving into a cell another
+  // molecule is leaving sideways is fine. Returns null on a collision; `why`,
+  // if given, is told what was hit.
+  function step(s, dirs, why) {
+    const fixed = new Map(), from = new Map();
     for (let i = 0; i < n; i++) {
-      if (!(s.mol >> i & 1)) continue;
-      pos[i] += off;
-      if (occ.has(pos[i])) return null;
+      const m = s.mid[i], d = m >= 0 ? dirs[m] : null;
+      if (d) from.set(s.pos[i], d); else fixed.set(s.pos[i], "atom");
     }
-    return resolve(pos, s.mol, s.bonds, s.free, s.charge, s.elec);
+    L.electrons.forEach((e, k) => { if (s.elec[k]) fixed.set(e.p, "electron"); });
+    const pos = s.pos.slice(), into = new Set();
+    let moved = 0;
+    for (let i = 0; i < n; i++) {
+      const m = s.mid[i], d = m >= 0 ? dirs[m] : null;
+      if (!d) continue;
+      const t = s.pos[i] + OFF[d], f = from.get(t);
+      if (fixed.has(t)) { if (why) why.kind = fixed.get(t); return null; }
+      if (into.has(t) || (f !== undefined && f === OPP[d])) { if (why) why.kind = "molecules"; return null; }
+      into.add(t);
+      pos[i] = t;
+      moved |= 1 << m;
+    }
+    let done = s.done;
+    for (let m = 0; m < P; m++) if (dirs[m] && exitIdx.has(pos[m])) done |= 1 << m;
+    const r = react(pos, s.mid, s.bonds, s.free, s.charge, s.elec, moved);
+    return mk(pos, r.mid, r.bonds, r.free, r.charge, r.elec, multi ? r.reacted : 0, done);
   }
 
-  // Can every atom still end neutral with no free electrons? Only molecule
-  // atoms bond or capture, and a loose atom only joins by bonding.
+  // Free electrons and charges on molecule m.
+  const potential = (s, m) => { let t = 0; for (let i = 0; i < n; i++) if (s.mid[i] === m) t += s.free[i] + s.charge[i]; return t; };
+  // Can molecule m still bond within itself (two of its atoms adjacent, both
+  // free, not yet bonded, e.g. held back by ambiguity)?
+  function ringPending(s, m) {
+    const at = new Map();
+    s.pos.forEach((p, i) => { if (s.mid[i] === m) at.set(p, i); });
+    const bonded = new Set(s.bonds.map(([i, j]) => pairKey(i, j)));
+    for (const [p, i] of at) {
+      if (!s.free[i]) continue;
+      for (const d of ["D", "R"]) {
+        const j = at.get(p + OFF[d]);
+        if (j !== undefined && s.free[j] && !bonded.has(pairKey(i, j))) return true;
+      }
+    }
+    return false;
+  }
+
+  // Can every atom still end in a molecule, neutral, with no free electrons?
+  // Only molecules bond or capture, a loose atom only joins by bonding, and
+  // molecules never merge, so each molecule has to settle on its own.
   function canFinish(s) {
-    for (let i = 0; i < n; i++) if (!(s.mol >> i & 1) && !s.free[i] && s.charge[i]) return false; // can never join
+    for (let i = 0; i < n; i++) if (s.mid[i] < 0 && !s.free[i]) return false; // can never join
     if (molCharge(s) + looseCharge(s) > electronsLeft(s)) return false;
-    const lf = looseFree(s), potential = need(s) + molCharge(s);
-    if (lf && !potential) return false;   // nothing left on the molecule to bond with them
-    if (!lf && potential) return false;   // nothing left to bond with the molecule
-    return true;
+    const lf = looseFree(s);
+    let open = false;
+    for (let m = 0; m < P; m++) {
+      if (!potential(s, m)) continue;
+      open = true;
+      if (!lf && !ringPending(s, m)) return false;  // nothing left to bond with it
+    }
+    return !(lf && !open);                           // loose atoms nothing can bond with
   }
 
-  const origin = L.pos[0];
-  let start = resolve(L.pos.slice(), 1, [], L.pos.map((_, i) => L.valence[i] - L.charge[i]), L.charge.slice(), L.electrons.map((e) => e.n));
-  // The path can't come back over the start, unless the start is also the
-  // exit (a loop): then coming back is how the path ends.
-  let visited0 = origin === E ? 0n : tileBit.get(origin);
-  // The path can't pass over tiles where atoms or electrons start.
-  for (let i = 1; i < n; i++) { const b = tileBit.get(L.pos[i]); if (b !== undefined) visited0 |= b; }
+  const origins = L.pos.slice(0, P);
+  const mid0 = L.pos.map((_, i) => i < P ? i : -1);
+  const r0 = react(L.pos.slice(), mid0, [], L.pos.map((_, i) => L.valence[i] - L.charge[i]), L.charge.slice(),
+    L.electrons.map((e) => e.n), ALL);
+  // A bond or capture right at the start takes the first time step, like any other.
+  const start = mk(L.pos.slice(), r0.mid, r0.bonds, r0.free, r0.charge, r0.elec, multi ? r0.reacted : 0, 0);
+  // Paths can't pass over a start (unless it is also an exit: a loop), or over
+  // tiles where atoms or electrons start.
+  let visited0 = 0n;
+  for (let i = 0; i < n; i++) {
+    const b = tileBit.get(L.pos[i]);
+    if (b !== undefined && !(i < P && exitIdx.has(L.pos[i]))) visited0 |= b;
+  }
   for (const e of L.electrons) { const b = tileBit.get(e.p); if (b !== undefined) visited0 |= b; }
 
-  // A start with a fixed direction forces the first step, so it is taken up
-  // front: the tile it leads to becomes part of the path and play begins there.
+  // A start with a fixed direction forces its first step.
   let startError = "";
-  if (startDir) {
-    const lead = origin + OFF[startDir];
-    const b = pathBit(lead, startDir);
-    const next = b !== undefined && !(visited0 & b) && (lead !== E || !exitDir || exitDir === startDir)
-      ? step(start, OFF[startDir]) : null;
-    if (next) { start = next; visited0 |= b; }
-    else startError = "The start's first step is blocked, so the level can't be played.";
-  }
+  L.startDirs.forEach((d, m) => {
+    if (!d || startError) return;
+    const lead = origins[m] + OFF[d], k = exitIdx.get(lead), b = pathBit(lead, d);
+    const ok = k !== undefined ? !L.exitDirs[k] || L.exitDirs[k] === d : b !== undefined && !(visited0 & b);
+    if (!ok) startError = P > 1 ? `Start ${m + 1}'s first step is blocked, so the level can't be played.` : "The start's first step is blocked, so the level can't be played.";
+  });
 
   // Every atom neutral with no free electrons.
   const settled = (s) => !need(s) && !looseFree(s) && !molCharge(s) && !looseCharge(s);
 
-  // The path has ended once the lead is on the exit, except at the very start
-  // of a loop, where it is still waiting to leave.
-  const ended = (s) => s.pos[0] === E && (s !== start || origin !== E);
-
-  // A finished path: on the exit, every atom settled, the molecule inside the level.
+  // Won: every path has reached an exit, every atom is in a molecule and
+  // settled, and every molecule is inside the level.
   function isWin(s) {
-    if (!ended(s) || !settled(s)) return false;
-    for (let i = 0; i < n; i++) if ((s.mol >> i & 1) && !tiles.has(s.pos[i])) return false;
+    if (s.done !== ALL || !settled(s)) return false;
+    for (let i = 0; i < n; i++) if (s.mid[i] < 0 || !tiles.has(s.pos[i])) return false;
     return true;
   }
 
-  // The heading the path starts with: the automatic first step, if any.
-  const startHeading = startDir && !startError ? startDir : "";
+  // Replay drawn paths (each including its forced first step). Molecules whose
+  // path is used up wait where they are. Returns every time step's state, when
+  // each molecule made each move and reached the end of its path, and the
+  // time step of a collision if there is one.
+  function simulate(paths) {
+    let s = start;
+    const frames = [s], idx = new Array(P).fill(0), tip = new Array(P).fill(0), moveTicks = paths.map(() => []);
+    for (let t = 1; t <= 100000; t++) {
+      const dirs = new Array(P).fill(null);
+      let pending = false;
+      for (let m = 0; m < P; m++) {
+        if ((s.done >> m & 1) || idx[m] >= paths[m].length) continue;
+        pending = true;
+        if (!(s.paused >> m & 1)) dirs[m] = paths[m][idx[m]];
+      }
+      // Stop once no path has moves left; molecules still reacting just wait.
+      if (!pending) break;
+      const why = {};
+      const nxt = step(s, dirs, why);
+      if (!nxt) return { frames, tip, moveTicks, error: t, why: why.kind };
+      for (let m = 0; m < P; m++) if (dirs[m]) { moveTicks[m].push(t); if (++idx[m] === paths[m].length) tip[m] = t; }
+      s = nxt;
+      frames.push(s);
+    }
+    return { frames, tip, moveTicks, error: 0 };
+  }
 
-  return { n, E, tiles, tileBit, cross, pathBit, ecell, exitDir, need, looseFree, molCharge, looseCharge, electronsLeft, settled,
-    blockedCells, step, canFinish, ended, isWin, origin, start, visited0, startError, startHeading };
+  return { n, P, multi, ALL, exits, exitIdx, tiles, tileBit, cross, pathBit, ecell, need, looseFree, molCharge, looseCharge,
+    electronsLeft, settled, blockedCells, step, canFinish, isWin, simulate, origins, start, visited0, startError, potential };
 }
 
 function solve(L) {
-  const { n, E, tiles, cross, exitDir, settled, blockedCells, step, canFinish, ended, isWin, start, visited0, startError, startHeading } = makeEngine(L);
+  const G = makeEngine(L);
+  const { n, P, multi, ALL, exits, exitIdx, tiles, cross, settled, blockedCells, step, canFinish, isWin, simulate, start, visited0, startError } = G;
   if (startError) return { type: "blocked", message: startError };
 
-  // The solver tracks the tiles the path has used as arrays of 32-bit words
+  // The solver tracks the tiles the paths have used as arrays of 32-bit words
   // (bit k = tile k; a crossing has a second bit for its vertical pass). They
   // are much faster than BigInt here, especially in Safari.
   const T = L.tiles.length;
@@ -510,62 +612,69 @@ function solve(L) {
   const words0 = new Int32Array(W);
   for (let k = 0; k < T + L.crossings.length; k++) if ((visited0 >> BigInt(k)) & 1n) words0[k >> 5] |= 1 << (k & 31);
 
-  // Neighbours of each tile, by direction: a tile index, -1 for none, -2 for the exit.
+  // Neighbours of each tile, by direction: a tile index, -1 for none, or
+  // -2 - k for exit k (entering an exit ends a path).
   const nbr = new Int32Array(T * 4).fill(-1);
-  const crossV = new Int32Array(T).fill(-1);
+  const crossVi = new Int32Array(T).fill(-1);
   L.tiles.forEach((p, k) => {
     DK.forEach((d, j) => {
       const q = p + OFF[d];
-      if (q === E) nbr[k * 4 + j] = -2;
+      if (exitIdx.has(q)) nbr[k * 4 + j] = -2 - exitIdx.get(q);
       else if (tileIdx.has(q)) nbr[k * 4 + j] = tileIdx.get(q);
     });
-    if (cross.has(p)) crossV[k] = crossIdx.get(p);
+    if (cross.has(p)) crossVi[k] = crossIdx.get(p);
   });
-  const exitOk = DK.map((d) => !exitDir || d === exitDir);
+  const exitOk = exits.map((_, k) => DK.map((d) => !L.exitDirs[k] || d === L.exitDirs[k]));
   const mark = new Int32Array(T), stack = new Int32Array(T);
   let stamp = 0;
 
-  // The free region: unused path bits on tiles still reachable from the lead
-  // through unused tiles (a crossing is open while either pass is unused).
-  // Used tiles outside it can never matter again, so the search compares
-  // arrivals by this region rather than by every tile used so far. Returns
-  // null when the exit (entered from the right side) can't be reached.
-  function freeRegion(lead, v) {
+  // The free region: unused path bits on tiles still reachable from any moving
+  // molecule's lead through unused tiles (a crossing is open while either pass
+  // is unused). Used tiles outside it can never matter again, so the search
+  // compares arrivals by this region rather than by every tile used so far.
+  // Returns null when some lead can no longer reach a free exit.
+  function freeRegion(s, v) {
     const free = new Int32Array(W);
-    let found = false, sp = 0;
-    stamp++;
-    const k0 = tileIdx.get(lead);
-    mark[k0] = stamp; stack[sp++] = k0;
-    while (sp) {
-      const k = stack[--sp];
-      for (let j = 0; j < 4; j++) {
-        const t = nbr[k * 4 + j];
-        if (t === -1) continue;
-        if (t === -2) { if (exitOk[j]) found = true; continue; }
-        if (mark[t] === stamp) continue;
-        let open = false;
-        if (!has(v, t)) { free[t >> 5] |= 1 << (t & 31); open = true; }
-        const c = crossV[t];
-        if (c >= 0 && !has(v, c)) { free[c >> 5] |= 1 << (c & 31); open = true; }
-        if (open) { mark[t] = stamp; stack[sp++] = t; }
+    let taken = 0;
+    for (let m = 0; m < P; m++) if (s.done >> m & 1) taken |= 1 << exitIdx.get(s.pos[m]);
+    for (let m = 0; m < P; m++) {
+      if (s.done >> m & 1) continue;
+      let found = false, sp = 0;
+      stamp++;
+      const k0 = tileIdx.get(s.pos[m]);
+      mark[k0] = stamp; stack[sp++] = k0;
+      while (sp) {
+        const k = stack[--sp];
+        for (let j = 0; j < 4; j++) {
+          const t = nbr[k * 4 + j];
+          if (t === -1) continue;
+          if (t <= -2) { const e = -2 - t; if (exitOk[e][j] && !(taken >> e & 1)) found = true; continue; }
+          if (mark[t] === stamp) continue;
+          let open = false;
+          if (!has(v, t)) { free[t >> 5] |= 1 << (t & 31); open = true; }
+          const c = crossVi[t];
+          if (c >= 0 && !has(v, c)) { free[c >> 5] |= 1 << (c & 31); open = true; }
+          if (open) { mark[t] = stamp; stack[sp++] = t; }
+        }
       }
+      if (!found) return null;
     }
-    return found ? free : null;
+    return free;
   }
-  const ENDED = new Int32Array(W); // a path that has reached the exit has nothing left
   const within = (a, b) => { for (let i = 0; i < W; i++) if ((a[i] & b[i]) !== a[i]) return false; return true; };
 
-  // Shortest route to the exit once nothing can change any more (every atom
-  // settled, so the molecule's shape is fixed).
+  // One molecule, every atom settled: its shape is fixed and nothing else
+  // moves, so the rest is a plain shortest route to the exit.
   function finish(s, visited) {
+    const E = exits[0], exitDir = L.exitDirs[0];
     const lead = s.pos[0];
     const shape = [], blocked = blockedCells(s);
-    for (let i = 0; i < n; i++) if (s.mol >> i & 1) shape.push(s.pos[i] - lead);
+    for (let i = 0; i < n; i++) if (s.mid[i] === 0) shape.push(s.pos[i] - lead);
     const fits = (p) => shape.every((o) => !blocked.has(p + o));
     const inside = (p) => shape.every((o) => tiles.has(p + o));
     // The shape is fixed, so whether it ends inside the level is known up front.
     if (!inside(E)) return null;
-    if (ended(s)) return "";
+    if (s.done) return "";
     const route = (p, d) => {
       const out = [d];
       while (prev.get(p)) { const [q, e] = prev.get(p); out.push(e); p = q; }
@@ -589,68 +698,105 @@ function solve(L) {
     return null;
   }
 
-  // For each board state, the free regions it has been reached with. BFS
-  // reaches it first by the shortest paths, so a later arrival whose free
-  // region fits inside an earlier one can't do better and is dropped.
+  // Breadth-first over time steps, so the first win found takes the fewest
+  // steps. For each board state, the free regions it has been reached with:
+  // the search is the same from any time, so a later arrival whose free region
+  // fits inside an earlier one can't do better and is dropped.
   const seen = new Map();
-  const queue = [[start, words0, ""]];
-  let best = null, nodes = 0, depth = 0;
+  const queue = [[start, words0, new Array(P).fill(""), 0]];
+  let best = null, bestTicks = Infinity, nodes = 0, depth = 0;
+  const shortcut = P === 1 && !cross.size;
   for (let h = 0; h < queue.length; h++) {
-    const [s, v, path] = queue[h];
+    const [s, v, paths, ticks] = queue[h];
     queue[h] = undefined;
     if (++nodes > L.limit) return { type: "limit", nodes, depth };
-    if (path.length > depth) {
-      depth = path.length;
+    if (ticks > depth) {
+      depth = ticks;
       self.postMessage({ type: "progress", nodes, depth });
     } else if (nodes % 50000 === 0) self.postMessage({ type: "progress", nodes, depth });
-    if (best !== null && path.length >= best.length) break;
-    if (settled(s)) {
-      // With no crossings the rest is a plain shortest-route search. A path
-      // may need to cross itself to finish, so with crossings keep searching.
-      if (!cross.size) {
-        const rest = finish(s, v);
-        if (rest !== null && (best === null || path.length + rest.length < best.length)) best = path + rest;
-        continue;
-      }
-      if (isWin(s)) { best = path; break; }
+    if (ticks >= bestTicks) break;
+    if (isWin(s)) { best = paths; bestTicks = ticks; break; }
+    if (shortcut && settled(s)) {
+      const rest = finish(s, v);
+      if (rest !== null && ticks + rest.length < bestTicks) { best = [paths[0] + rest]; bestTicks = ticks + rest.length; }
+      continue;
     }
-    if (ended(s) || (L.maxLen && path.length >= L.maxLen)) continue;
-    // On a crossing the path has to go straight on.
-    const heading = path ? path[path.length - 1] : startHeading;
-    for (const d of DK) {
-      if (cross.has(s.pos[0]) && d !== heading) continue;
-      const lead = s.pos[0] + OFF[d];
-      const k = pathIdx(lead, d);
-      if (k === undefined || has(v, k)) continue;
-      if (lead === E && exitDir && d !== exitDir) continue;
-      const nxt = step(s, OFF[d]);
-      if (!nxt || !canFinish(nxt)) continue;
-      if (lead === E && !settled(nxt)) continue; // the path ends on the exit
+    if (s.done === ALL || (L.maxLen && ticks >= L.maxLen)) continue;
+
+    // Every molecule that isn't finished or reacting has to move; list each
+    // one's possible moves.
+    const movers = [], options = [];
+    let stuck = false;
+    for (let m = 0; m < P && !stuck; m++) {
+      if ((s.done >> m & 1) || (s.paused >> m & 1)) continue;
+      const lead = s.pos[m], path = paths[m];
+      let dirs = DK;
+      if (!path && L.startDirs[m]) dirs = [L.startDirs[m]];                    // forced first step
+      else if (cross.has(lead) && path) dirs = [path[path.length - 1]];        // straight on over a crossing
+      const opts = [];
+      for (const d of dirs) {
+        const q = lead + OFF[d];
+        const e = exitIdx.get(q);
+        if (e !== undefined) { if (!L.exitDirs[e] || L.exitDirs[e] === d) opts.push([d, -2 - e]); continue; }
+        const k = pathIdx(q, d);
+        if (k === undefined || has(v, k)) continue;
+        opts.push([d, k]);
+      }
+      if (!opts.length) stuck = true;  // this path can't go on, and paths never wait
+      movers.push(m);
+      options.push(opts);
+    }
+    if (stuck || (!movers.length && !s.paused)) continue;
+
+    // Every combination of moves (paths can't share a tile in the same step).
+    const choice = new Array(movers.length);
+    const expand = (x) => {
+      if (x < movers.length) {
+        for (const o of options[x]) {
+          let clash = false;
+          for (let y = 0; y < x; y++) if (choice[y][1] === o[1]) clash = true;
+          if (clash) continue;
+          choice[x] = o;
+          expand(x + 1);
+        }
+        return;
+      }
+      const dirs = new Array(P).fill(null);
+      movers.forEach((m, y) => { dirs[m] = choice[y][0]; });
+      const nxt = step(s, dirs);
+      if (!nxt || !canFinish(nxt)) return;
+      // With one molecule, arriving at the exit unsettled can't be fixed later.
+      if (!multi && nxt.done && !settled(nxt)) return;
       const nv = v.slice();
-      nv[k >> 5] |= 1 << (k & 31);
-      const free = lead === E ? ENDED : freeRegion(lead, nv);
-      if (!free) continue;
+      for (const [, k] of choice) if (k >= 0) nv[k >> 5] |= 1 << (k & 31);
+      const free = freeRegion(nxt, nv);
+      if (!free) return;
+      const npaths = paths.slice();
+      movers.forEach((m, y) => { npaths[m] += choice[y][0]; });
       // On a crossing the heading decides the next move, so it's part of the state.
-      const key = cross.has(lead) ? nxt.key + "|" + d : nxt.key;
+      let key = nxt.key;
+      for (let m = 0; m < P; m++) if (!(nxt.done >> m & 1) && cross.has(nxt.pos[m])) key += "|" + m + npaths[m][npaths[m].length - 1];
       let masks = seen.get(key);
       if (!masks) { masks = []; seen.set(key, masks); }
-      if (masks.some((m) => within(free, m))) continue;
+      if (masks.some((mk) => within(free, mk))) return;
       // Earlier regions inside this one can't rule out anything it doesn't.
       let w = 0;
       for (let i = 0; i < masks.length; i++) if (!within(masks[i], free)) masks[w++] = masks[i];
       masks.length = w;
       masks.push(free);
-      queue.push([nxt, nv, path + d]);
-    }
+      queue.push([nxt, nv, npaths, ticks + 1]);
+    };
+    expand(0);
   }
-  if (best === null || (L.maxLen && best.length > L.maxLen)) return { type: "none", nodes };
+  if (best === null || (L.maxLen && bestTicks > L.maxLen)) return { type: "none", nodes };
 
-  const frames = [start];
-  let s = start;
-  for (const d of best) { s = step(s, OFF[d]); frames.push(s); }
+  const run = simulate(best);
+  // Report paths without their forced first steps, which aren't moves.
+  const shown = best.map((p, m) => (L.startDirs[m] ? p.slice(1) : p));
   return {
-    type: "done", path: best, nodes,
-    frames: frames.map((f) => ({ pos: f.pos, mol: f.mol, bonds: f.bonds, free: f.free, charge: f.charge, elec: f.elec })),
+    type: "done", paths: shown, full: best, nodes, ticks: run.frames.length - 1,
+    moves: shown.reduce((t, p) => t + p.length, 0), moveTicks: run.moveTicks,
+    frames: run.frames.map((f) => ({ pos: f.pos, mid: f.mid, bonds: f.bonds, free: f.free, charge: f.charge, elec: f.elec })),
   };
 }
 
@@ -708,7 +854,9 @@ const TOOLS = [
   { id: "electron", label: "Electron", icon: '<span class="swatch" style="background:var(--electron)"></span>' },
   { id: "charge", label: "Charge +", icon: "⊕" },
   { sep: true },
-  { id: "player", label: "Make player", icon: "◎" },
+  { id: "player", label: "Start", icon: "◎" },
+  { id: "startdir", label: "Start dir", icon: "↻" },
+  { id: "exitdir", label: "Exit dir", icon: "↺" },
   { id: "erase", label: "Clear", icon: "✕" },
 ];
 
@@ -728,9 +876,13 @@ const valenceOf = (el) => (M.valence[el] ?? VAL[el] ?? 1);
 const colorOf = (el) => (VAL[el] !== undefined ? `var(--${el.toLowerCase()})` : "var(--x)");
 
 /* ---------- text <-> model ---------- */
-// A cell is { t: "floor" | "void" | "exit", atom: { el, player, charge } | null, e: electrons }.
-// Atoms and electrons may sit on a hole ("void") as well as on a tile.
-const blankCell = (t = "floor") => ({ t, atom: null, e: 0 });
+// A cell is { t: "floor" | "void" | "exit" | "cross", atom: { el, player, charge, dir } | null,
+// e: electrons, dir: an exit's entry direction }. A player atom's dir is its
+// start direction. Atoms and electrons may sit on a hole as well as a tile.
+const blankCell = (t = "floor") => ({ t, atom: null, e: 0, dir: "" });
+const DIRCH = { U: "^", D: "v", L: "<", R: ">" };
+const CHDIR = { "^": "U", v: "D", "<": "L", ">": "R" };
+const MAXSTARTS = 4;
 
 // One grid row -> cell tokens. "[...]" groups several characters into one cell.
 function rowTokens(row, r) {
@@ -753,19 +905,25 @@ function parseCell(tok, known, r, c) {
   if (tok === "+") return blankCell("cross");
   if (tok === "-") return { ...blankCell(), e: 1 };
   if (tok.length === 1 && /[a-z]/i.test(tok) && known[tok.toUpperCase()] !== undefined)
-    return { ...blankCell(), atom: { el: tok.toUpperCase(), player: tok !== tok.toUpperCase(), charge: 0 } };
-  // [letter][+...][-...][# for a hole | E for the exit, under the player's atom]
-  const m = tok.match(/^\[([A-Za-z]?)(\+*)(-*)(#|E)?\]$/);
+    return { ...blankCell(), atom: { el: tok.toUpperCase(), player: tok !== tok.toUpperCase(), charge: 0, dir: "" } };
+  // An exit with its entry direction: [E^]
+  let m = tok.match(/^\[E([\^v<>]?)\]$/);
+  if (m) return { ...blankCell("exit"), dir: CHDIR[m[1]] || "" };
+  // [letter][+...][-...][start direction][# for a hole | E for an exit, under a start][exit direction]
+  m = tok.match(/^\[([A-Za-z]?)(\+*)(-*)([\^v<>]?)(#|E)?([\^v<>]?)\]$/);
   if (!m || (m[1] && m[3]) || (!m[1] && m[2]) || (!m[1] && !m[3]))
-    throw new Error(`Can't read "${tok}" at ${where}. Use a letter, "-", or a group like [O+], [--], [H#] or [oE].`);
-  if (m[4] === "E" && !(m[1] && m[1] !== m[1].toUpperCase()))
-    throw new Error(`Only the player's atom (a lowercase letter) can start on the exit, at ${where}.`);
-  const cell = blankCell(m[4] === "#" ? "void" : m[4] === "E" ? "exit" : "floor");
+    throw new Error(`Can't read "${tok}" at ${where}. Use a letter, "-", or a group like [O+], [--], [H#], [oE] or [o>].`);
+  const player = !!m[1] && m[1] !== m[1].toUpperCase();
+  if (m[5] === "E" && !player) throw new Error(`Only a start (a lowercase letter) can sit on an exit, at ${where}.`);
+  if (m[4] && !player) throw new Error(`Only a start (a lowercase letter) has a direction, at ${where}.`);
+  if (m[6] && m[5] !== "E") throw new Error(`A direction after the letter belongs before "#" or "E", at ${where}.`);
+  const cell = blankCell(m[5] === "#" ? "void" : m[5] === "E" ? "exit" : "floor");
+  cell.dir = CHDIR[m[6]] || "";
   if (m[1]) {
     const el = m[1].toUpperCase();
     if (known[el] === undefined) throw new Error(`Unknown element "${m[1]}" at ${where}. Add a line like "valence: ${el}=2".`);
     if (m[2].length > known[el]) throw new Error(`${el} at ${where} can have a charge of at most ${known[el]}.`);
-    cell.atom = { el, player: m[1] !== el, charge: m[2].length };
+    cell.atom = { el, player, charge: m[2].length, dir: CHDIR[m[4]] || "" };
   } else cell.e = m[3].length;
   return cell;
 }
@@ -800,84 +958,114 @@ function parseLevel(text) {
   const known = { ...VAL, ...valence };
   const cells = [];
   for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) cells.push(parseCell(toks[r][c] ?? " ", known, r, c));
-  return { w, h, cells, startDir, exitDir, valence };
+  // "start=" and "exit=" lines set the direction of every start and exit without its own.
+  for (const x of cells) {
+    if (x.atom && x.atom.player && !x.atom.dir) x.atom.dir = startDir;
+    if (x.t === "exit" && !x.dir) x.dir = exitDir;
+  }
+  return { w, h, cells, valence };
 }
 
-function cellText(x) {
+// perCell: write each start's and exit's direction in its own cell.
+function cellText(x, perCell) {
   const off = x.t === "void" ? "#" : x.t === "exit" ? "E" : "";
+  const ed = perCell && x.t === "exit" ? DIRCH[x.dir] || "" : "";
   if (x.atom) {
     const letter = x.atom.player ? x.atom.el.toLowerCase() : x.atom.el;
-    return x.atom.charge || off ? `[${letter}${"+".repeat(x.atom.charge)}${off}]` : letter;
+    const sd = perCell && x.atom.player ? DIRCH[x.atom.dir] || "" : "";
+    const inner = `${letter}${"+".repeat(x.atom.charge)}${sd}${off}${ed}`;
+    return inner === letter ? letter : `[${inner}]`;
   }
   if (x.e) return x.e === 1 && !off ? "-" : `[${"-".repeat(x.e)}${off}]`;
-  return x.t === "void" ? "#" : x.t === "exit" ? "E" : x.t === "cross" ? "+" : ".";
+  if (x.t === "exit") return ed ? `[E${ed}]` : "E";
+  return x.t === "void" ? "#" : x.t === "cross" ? "+" : ".";
 }
 
 function serialize(m) {
   const lines = [];
-  if (m.startDir) lines.push("start=" + m.startDir);
-  if (m.exitDir) lines.push("exit=" + m.exitDir);
+  const starts = m.cells.filter((x) => x.atom && x.atom.player), exitCells = m.cells.filter((x) => x.t === "exit");
+  // One start and one exit keep the simple "start=" / "exit=" lines.
+  const perCell = starts.length > 1 || exitCells.length > 1;
+  if (!perCell) {
+    if (starts[0] && starts[0].atom.dir) lines.push("start=" + starts[0].atom.dir);
+    if (exitCells[0] && exitCells[0].dir) lines.push("exit=" + exitCells[0].dir);
+  }
   const extra = Object.entries(m.valence).filter(([k, v]) => VAL[k] !== v);
   if (extra.length) lines.push("valence: " + extra.map(([k, v]) => `${k}=${v}`).join(", "));
   for (let r = 0; r < m.h; r++) {
     let s = "";
-    for (let c = 0; c < m.w; c++) s += cellText(m.cells[r * m.w + c]);
+    for (let c = 0; c < m.w; c++) s += cellText(m.cells[r * m.w + c], perCell);
     lines.push(s);
   }
   return lines.join("\n");
 }
 
 function buildLevel() {
-  const tiles = [], atoms = [], electrons = [], crossings = [];
-  let exit = null, exits = 0;
+  const tiles = [], atoms = [], electrons = [], crossings = [], exits = [], exitDirs = [];
   for (let r = 0; r < M.h; r++) for (let c = 0; c < M.w; c++) {
     const x = M.cells[r * M.w + c], p = enc(r, c);
     if (x.t !== "void") tiles.push(p);
-    if (x.t === "exit") { exit = p; exits++; }
+    if (x.t === "exit") { exits.push(p); exitDirs.push(x.dir || ""); }
     if (x.t === "cross") crossings.push(p);
     if (x.atom) atoms.push({ ...x.atom, p, onTile: x.t !== "void" });
-    if (x.t === "exit" && (x.e || (x.atom && !x.atom.player))) throw new Error("Only the player's atom can start on the exit (making the path a loop).");
+    if (x.t === "exit" && (x.e || (x.atom && !x.atom.player))) throw new Error("Only a start can sit on an exit (making its path a loop).");
     if (x.e) electrons.push({ p, n: x.e });
   }
   const players = atoms.filter((a) => a.player);
-  if (!players.length) throw new Error("Pick the player's atom: choose Make player and click an atom (or use a lowercase letter in the text).");
-  if (players.length > 1) throw new Error("There can be only one player atom.");
-  if (!players[0].onTile) throw new Error("The player's atom has to start on a tile, not a hole.");
-  if (!exits) throw new Error("Place an exit tile (E).");
-  if (exits > 1) throw new Error("There can be only one exit.");
+  if (!players.length) throw new Error("Add a start: choose Start and click an atom (or use a lowercase letter in the text).");
+  if (players.length > MAXSTARTS) throw new Error(`A level can have at most ${MAXSTARTS} starts.`);
+  if (players.some((a) => !a.onTile)) throw new Error("Every start has to be on a tile, not a hole.");
+  if (!exits.length) throw new Error("Place an exit tile (E).");
+  if (exits.length !== players.length) throw new Error(`The level has ${players.length} start${players.length === 1 ? "" : "s"} and ${exits.length} exit${exits.length === 1 ? "" : "s"}; they have to match.`);
   for (const a of atoms) if (a.charge > valenceOf(a.el)) throw new Error(`${a.el} can have a charge of at most ${valenceOf(a.el)}.`);
   // Charges only change by capturing electrons (one each), so whether they can
   // all be cleared is decided by the level itself, not by how it's played.
   const charges = atoms.reduce((t, a) => t + a.charge, 0), elecs = electrons.reduce((t, e) => t + e.n, 0);
   if (charges > elecs) throw new Error(`The level has ${charges} charge${charges === 1 ? "" : "s"} but only ${elecs} electron${elecs === 1 ? "" : "s"}, so not every ion can become neutral.`);
-  const stuck = atoms.find((a) => !a.player && a.charge && a.charge === valenceOf(a.el));
-  if (stuck) throw new Error(`A loose ${stuck.el}${stuck.charge > 1 ? stuck.charge : ""}+ has no free electrons, so it can never join the molecule and become neutral.`);
+  const stuck = atoms.find((a) => !a.player && a.charge === valenceOf(a.el));
+  if (stuck) throw new Error(`A loose ${stuck.el}${stuck.charge > 1 ? stuck.charge : ""}${stuck.charge ? "+" : ""} has no free electrons, so it can never join a molecule.`);
+  // Starts first (in reading order): atom m leads molecule m.
   atoms.sort((a, b) => b.player - a.player);
   return {
-    tiles, exit, electrons, crossings,
+    tiles, exits, exitDirs, electrons, crossings,
+    players: players.length,
+    startDirs: players.map((a) => a.dir || ""),
     pos: atoms.map((a) => a.p),
     elems: atoms.map((a) => a.el),
     valence: atoms.map((a) => valenceOf(a.el)),
     charge: atoms.map((a) => a.charge),
-    startDir: M.startDir, exitDir: M.exitDir,
     maxLen: Math.max(0, +$("maxLen").value || 0),
     limit: Math.max(10000, +$("limit").value || 3000000),
   };
 }
 
 /* ---------- drawing ---------- */
-// A thick arrow in the path colour from (x1, y1) to its tip at (x2, y2).
-function arrow(x1, y1, x2, y2) {
+const PATHC = ["var(--p0)", "var(--p1)", "var(--p2)", "var(--p3)"];
+
+// A thick arrow from (x1, y1) to its tip at (x2, y2).
+function arrow(x1, y1, x2, y2, color) {
   const len = Math.hypot(x2 - x1, y2 - y1), ux = (x2 - x1) / len, uy = (y2 - y1) / len, head = 12, half = 9;
   const bx = x2 - ux * head, by = y2 - uy * head;
-  return `<g opacity="0.85"><line x1="${x1}" y1="${y1}" x2="${bx}" y2="${by}" stroke="var(--accent)" stroke-width="6" stroke-linecap="round"/>` +
-    `<polygon points="${x2},${y2} ${bx - uy * half},${by + ux * half} ${bx + uy * half},${by - ux * half}" fill="var(--accent)"/></g>`;
+  return `<g opacity="0.85"><line x1="${x1}" y1="${y1}" x2="${bx}" y2="${by}" stroke="${color}" stroke-width="6" stroke-linecap="round"/>` +
+    `<polygon points="${x2},${y2} ${bx - uy * half},${by + ux * half} ${bx + uy * half},${by - ux * half}" fill="${color}"/></g>`;
 }
 
+// Starts in reading order (the same order the engine numbers molecules).
+const startCells = () => M.cells.map((x, k) => [x, k]).filter(([x]) => x.atom && x.atom.player).map(([x, k]) => ({ x, r: Math.floor(k / M.w), c: k % M.w }));
+
 // What the board shows: the try-mode game, a solution being played back, or (null) the editor.
+// paths: for each molecule, the cells its path runs through; drawn: how far.
 function scene() {
-  if (mode === "try" && game) return { frames: game.states, cur: game.states.length - 1, elems: game.L.elems, electrons: game.L.electrons, init: game.L.pos, bounds: game.bounds, origin: game.G.origin, ghost: false };
-  if (mode === "solve" && sol) return { frames: sol.frames, cur, elems: sol.elems, electrons: sol.electrons, init: sol.init, bounds: sol.bounds, origin: sol.origin, ghost: true };
+  if (mode === "try" && game) {
+    const paths = game.paths.map((_, m) => tryCells(m));
+    return { frames: game.sim.frames, cur: game.tick, P: game.L.players, elems: game.L.elems, electrons: game.L.electrons,
+      init: game.L.pos, bounds: game.bounds, paths, drawn: paths.map((c) => c.length), ghost: false };
+  }
+  if (mode === "solve" && sol) {
+    const drawn = sol.cells.map((cells, m) => 1 + sol.moveTicks[m].filter((t) => t <= cur).length);
+    return { frames: sol.frames, cur, P: sol.P, elems: sol.elems, electrons: sol.electrons, init: sol.init,
+      bounds: sol.bounds, paths: sol.cells, drawn, ghost: true };
+  }
   return null;
 }
 
@@ -885,15 +1073,16 @@ function currentAtoms(sc) {
   if (sc) {
     const f = sc.frames[sc.cur];
     return {
-      atoms: f.pos.map((p, i) => { const [r, c] = dec(p); return { r, c, el: sc.elems[i], mol: !!(f.mol >> i & 1), free: f.free[i], charge: f.charge[i], player: i === 0 }; }),
+      atoms: f.pos.map((p, i) => { const [r, c] = dec(p); return { r, c, el: sc.elems[i], mol: f.mid[i], free: f.free[i], charge: f.charge[i], player: i < sc.P }; }),
       bonds: f.bonds,
       electrons: sc.electrons.map((e, k) => { const [r, c] = dec(e.p); return { r, c, n: f.elec[k], init: e.n }; }),
     };
   }
   const atoms = [], electrons = [];
+  const order = new Map(startCells().map((st, m) => [st.x, m]));
   M.cells.forEach((x, k) => {
     const r = Math.floor(k / M.w), c = k % M.w;
-    if (x.atom) atoms.push({ r, c, el: x.atom.el, mol: x.atom.player, free: valenceOf(x.atom.el) - x.atom.charge, charge: x.atom.charge, player: x.atom.player });
+    if (x.atom) atoms.push({ r, c, el: x.atom.el, mol: x.atom.player ? order.get(x) : -1, free: valenceOf(x.atom.el) - x.atom.charge, charge: x.atom.charge, player: x.atom.player });
     if (x.e) electrons.push({ r, c, n: x.e, init: x.e });
   });
   return { atoms, bonds: [], electrons };
@@ -910,9 +1099,8 @@ function draw() {
   svg.setAttribute("viewBox", `${vx} ${vy} ${vw} ${vh}`);
   const out = [];
   out.push(`<rect x="${vx}" y="${vy}" width="${vw}" height="${vh}" fill="transparent"/>`);
-
-  let startCell = null;
-  M.cells.forEach((x, k) => { if (x.atom && x.atom.player) startCell = [Math.floor(k / M.w), k % M.w]; });
+  const starts = startCells();
+  const single = starts.length <= 1;
 
   // tiles
   for (let r = 0; r < M.h; r++) for (let c = 0; c < M.w; c++) {
@@ -924,7 +1112,7 @@ function draw() {
     }
     out.push(`<rect x="${X + 2}" y="${Y + 2}" width="${S - 4}" height="${S - 4}" rx="9" fill="var(--tile)" stroke="var(--tile-edge)"/>`);
     if (x.t === "cross") {
-      // Two tracks through the middle: the path may use each once, straight on.
+      // Two tracks through the middle: paths may use each once, straight on.
       out.push(`<path d="M${X + 6} ${Y + S / 2 - 7} h${S - 12} M${X + 6} ${Y + S / 2 + 7} h${S - 12} M${X + S / 2 - 7} ${Y + 6} v${S - 12} M${X + S / 2 + 7} ${Y + 6} v${S - 12}" stroke="var(--tile-edge)" stroke-width="2.5" fill="none"/>`);
     }
     if ((x.atom && !x.atom.player) || x.e) {
@@ -932,49 +1120,46 @@ function draw() {
     }
   }
 
-  // start pad and exit
+  // exits, each with an arrow from the cell it must be entered from
   M.cells.forEach((x, k) => {
     if (x.t !== "exit") return;
     const r = Math.floor(k / M.w), c = k % M.w, X = c * S, Y = r * S;
     out.push(`<rect x="${X + 2}" y="${Y + 2}" width="${S - 4}" height="${S - 4}" rx="9" fill="var(--ink)"/>`);
     out.push(`<rect x="${X + 10}" y="${Y + 10}" width="${S - 20}" height="${S - 20}" rx="5" fill="none" stroke="var(--bg)" stroke-width="2"/>`);
-    if (M.exitDir) {
-      // An arrow from the previous cell into the exit.
-      const [dr, dc] = DIRV[M.exitDir], cx = X + S / 2, cy = Y + S / 2;
-      out.push(arrow(cx - dc * S, cy - dr * S, cx - dc * S * 0.3, cy - dr * S * 0.3));
+    if (x.dir) {
+      const [dr, dc] = DIRV[x.dir], cx = X + S / 2, cy = Y + S / 2;
+      out.push(arrow(cx - dc * S, cy - dr * S, cx - dc * S * 0.3, cy - dr * S * 0.3, single ? PATHC[0] : "var(--muted)"));
     } else {
       out.push(`<circle cx="${X + S / 2}" cy="${Y + S / 2}" r="4" fill="var(--bg)"/>`);
     }
   });
-  // drawn after the exit so a loop's start still shows on top of it
-  if (startCell) {
-    const [r, c] = startCell, X = c * S, Y = r * S;
-    out.push(`<rect x="${X + 7}" y="${Y + 7}" width="${S - 14}" height="${S - 14}" rx="7" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="4 3"/>`);
-    if (M.startDir) {
-      // An arrow from the start into the next cell.
-      const [dr, dc] = DIRV[M.startDir], cx = X + S / 2, cy = Y + S / 2;
-      out.push(arrow(cx + dc * S * 0.3, cy + dr * S * 0.3, cx + dc * S * 0.95, cy + dr * S * 0.95));
+  // starts, drawn after the exits so a loop's start shows on top, each in its path colour
+  starts.forEach(({ x, r, c }, m) => {
+    const X = c * S, Y = r * S, color = PATHC[m];
+    out.push(`<rect x="${X + 7}" y="${Y + 7}" width="${S - 14}" height="${S - 14}" rx="7" fill="none" stroke="${color}" stroke-width="2" stroke-dasharray="4 3"/>`);
+    if (x.atom.dir) {
+      const [dr, dc] = DIRV[x.atom.dir], cx = X + S / 2, cy = Y + S / 2;
+      out.push(arrow(cx + dc * S * 0.3, cy + dr * S * 0.3, cx + dc * S * 0.95, cy + dr * S * 0.95, color));
     }
-  }
+  });
 
-  // path
+  // paths
   if (sc) {
-    // The path runs from the start tile, through the automatic first step if there is one.
-    const leads = sc.frames.map((f) => f.pos[0]);
-    if (sc.origin !== leads[0]) leads.unshift(sc.origin);
-    const shown = leads.length - (sc.frames.length - 1 - sc.cur);
     const pt = (p) => { const [r, c] = dec(p); return `${c * S + S / 2},${r * S + S / 2}`; };
-    if (sc.ghost) out.push(`<polyline points="${leads.map(pt).join(" ")}" fill="none" stroke="var(--accent)" stroke-opacity="0.35" stroke-width="3" stroke-dasharray="2 6" stroke-linecap="round" stroke-linejoin="round"/>`);
-    if (shown > 1) out.push(`<polyline points="${leads.slice(0, shown).map(pt).join(" ")}" fill="none" stroke="var(--accent)" stroke-opacity="0.8" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>`);
+    sc.paths.forEach((cells, m) => {
+      if (sc.ghost) out.push(`<polyline points="${cells.map(pt).join(" ")}" fill="none" stroke="${PATHC[m]}" stroke-opacity="0.35" stroke-width="3" stroke-dasharray="2 6" stroke-linecap="round" stroke-linejoin="round"/>`);
+      const shown = Math.min(sc.drawn[m], cells.length);
+      if (shown > 1) out.push(`<polyline points="${cells.slice(0, shown).map(pt).join(" ")}" fill="none" stroke="${PATHC[m]}" stroke-opacity="0.8" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>`);
+    });
   }
 
-  // try mode: mark the tiles the path can go to next
-  if (mode === "try" && game && !game.over) {
+  // try mode: mark the tiles the selected path can go to next
+  if (mode === "try" && game) {
     for (const d of Engine.DK) {
       const m = checkMove(d);
-      if (!m.next) continue;
+      if (!m.ok) continue;
       const [r, c] = dec(m.lead);
-      out.push(`<circle cx="${c * S + S / 2}" cy="${r * S + S / 2}" r="7" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-opacity="0.7"/>`);
+      out.push(`<circle cx="${c * S + S / 2}" cy="${r * S + S / 2}" r="7" fill="none" stroke="${PATHC[game.sel]}" stroke-width="2.5" stroke-opacity="0.8"/>`);
     }
   }
 
@@ -1004,7 +1189,7 @@ function draw() {
       if (atoms[i] && enc(atoms[i].r, atoms[i].c) === p) return;
       const [r, c] = dec(p), cx = c * S + S / 2, cy = r * S + S / 2, el = sc.elems[i];
       out.push(`<circle cx="${cx}" cy="${cy}" r="${R}" fill="var(--used)"/>`);
-      out.push(`<text x="${cx}" y="${cy + 5.5}" text-anchor="middle" font-family="Lexend, system-ui, sans-serif" font-weight="700" font-size="16" fill="var(--used-ink)">${i === 0 ? el.toLowerCase() : el}</text>`);
+      out.push(`<text x="${cx}" y="${cy + 5.5}" text-anchor="middle" font-family="Lexend, system-ui, sans-serif" font-weight="700" font-size="16" fill="var(--used-ink)">${i < sc.P ? el.toLowerCase() : el}</text>`);
     });
   }
   const count = new Map();
@@ -1023,8 +1208,8 @@ function draw() {
     const cx = a.c * S + S / 2, cy = a.r * S + S / 2;
     const offLevel = sc && !isTile(a.r, a.c);
     out.push(`<g${offLevel ? ' opacity="0.55"' : ""}>`);
-    // The player's atom is ringed in the path colour, other molecule atoms in ink.
-    const ring = a.player ? "var(--accent)" : a.mol ? "var(--ink)" : "";
+    // A start's atom is ringed in its path colour, other molecule atoms in ink.
+    const ring = a.player ? PATHC[a.mol] : a.mol >= 0 ? "var(--ink)" : "";
     out.push(`<circle cx="${cx}" cy="${cy}" r="${R}" fill="${colorOf(a.el)}"${ring ? ` stroke="${ring}" stroke-width="3"` : ""}/>`);
     const sup = a.charge ? `<tspan font-size="11" dy="-6">${a.charge > 1 ? a.charge : ""}+</tspan>` : "";
     out.push(`<text x="${cx}" y="${cy + 5.5}" text-anchor="middle" font-family="Lexend, system-ui, sans-serif" font-weight="700" font-size="16" fill="var(--atom-text)">${a.player ? a.el.toLowerCase() : a.el}${sup}</text>`);
@@ -1042,34 +1227,49 @@ function isTile(r, c) {
 }
 
 /* ---------- editing ---------- */
+const NEXTDIR = { "": "U", U: "R", R: "D", D: "L", L: "" };
+
 function applyTool(r, c) {
   if (r < 0 || c < 0 || r >= M.h || c >= M.w) return false;
   const x = M.cells[r * M.w + c];
   const before = JSON.stringify(x);
+  const startCount = () => M.cells.filter((y) => y.atom && y.atom.player).length;
   switch (tool) {
     // Holes keep what's on them: atoms and electrons may start off the level.
-    case "floor": x.t = "floor"; break;
-    case "void": x.t = "void"; break;
+    case "floor": x.t = "floor"; x.dir = ""; break;
+    case "void": x.t = "void"; x.dir = ""; break;
+    // Adds an exit; a start already here stays (its path can be a loop).
     case "exit":
-      M.cells.forEach((y) => { if (y.t === "exit") y.t = "floor"; });
-      x.t = "exit"; x.e = 0;
-      if (!(x.atom && x.atom.player)) x.atom = null; // the exit under the player's atom makes a loop
+      if (x.t === "exit") return false;
+      x.t = "exit"; x.e = 0; x.dir = "";
+      if (!(x.atom && x.atom.player)) x.atom = null;
       break;
     // Nothing starts on a crossing.
-    case "cross": x.t = "cross"; x.atom = null; x.e = 0; break;
+    case "cross": x.t = "cross"; x.atom = null; x.e = 0; x.dir = ""; break;
+    // Turns a start on or off. Only a start may sit on an exit, so an atom
+    // there leaves with the role.
     case "player":
-      M.cells.forEach((y) => {
-        if (!y.atom || y === x) return;
-        // Only the player's atom may sit on the exit, so the old one leaves with the role.
-        if (y.atom.player && y.t === "exit") y.atom = null; else y.atom.player = false;
-      });
-      if (!x.atom) x.atom = { el: lastEl, player: true, charge: 0 }; else x.atom.player = true;
+      if (x.atom && x.atom.player) {
+        if (x.t === "exit") x.atom = null; else { x.atom.player = false; x.atom.dir = ""; }
+        break;
+      }
+      if (startCount() >= MAXSTARTS) { setEditMsg(`A level can have at most ${MAXSTARTS} starts.`); return false; }
+      if (!x.atom) x.atom = { el: lastEl, player: true, charge: 0, dir: "" }; else x.atom.player = true;
       if (x.t === "cross") x.t = "floor";
       x.e = 0;
       break;
+    // Cycles a start's or an exit's direction: any way, up, right, down, left.
+    case "startdir":
+      if (!(x.atom && x.atom.player)) return false;
+      x.atom.dir = NEXTDIR[x.atom.dir || ""];
+      break;
+    case "exitdir":
+      if (x.t !== "exit") return false;
+      x.dir = NEXTDIR[x.dir || ""];
+      break;
     case "electron":
       if (x.atom) return false;
-      if (x.t === "exit" || x.t === "cross") x.t = "floor";
+      if (x.t === "exit" || x.t === "cross") { x.t = "floor"; x.dir = ""; }
       x.e = Math.min(9, (x.e || 0) + 1);
       break;
     case "charge":
@@ -1079,11 +1279,12 @@ function applyTool(r, c) {
     case "erase":
       x.atom = null; x.e = 0;
       if (x.t === "exit" || x.t === "cross") x.t = "floor";
+      x.dir = "";
       break;
     default: {
-      if (x.t === "cross" || (x.t === "exit" && !(x.atom && x.atom.player))) x.t = "floor";
+      if (x.t === "cross" || (x.t === "exit" && !(x.atom && x.atom.player))) { x.t = "floor"; x.dir = ""; }
       const keep = x.atom && x.atom.el === tool ? x.atom.charge : 0;
-      x.atom = { el: tool, player: x.atom ? x.atom.player : false, charge: keep };
+      x.atom = x.atom ? { ...x.atom, el: tool, charge: keep } : { el: tool, player: false, charge: 0, dir: "" };
       x.e = 0;
       lastEl = tool;
     }
@@ -1105,7 +1306,6 @@ function modelChanged({ fromText = false } = {}) {
   try { buildLevel(); setEditMsg(""); } catch (e) { setEditMsg(e.message); }
   if (!fromText) $("text").value = serialize(M);
   $("w").value = M.w; $("h").value = M.h;
-  $("startDir").value = M.startDir; $("exitDir").value = M.exitDir;
   try { localStorage.setItem("sokobond-level", $("text").value); } catch (e) {}
   draw();
 }
@@ -1156,15 +1356,15 @@ function runSolve() {
   const t0 = performance.now();
   worker.onmessage = ({ data }) => {
     if (data.type === "progress") {
-      setStatus(`Searching… <b>${data.nodes.toLocaleString()}</b> states, paths up to ${data.depth} moves.`);
+      setStatus(`Searching… <b>${data.nodes.toLocaleString()}</b> states, up to ${data.depth} ${L.players > 1 ? "time steps" : "moves"}.`);
       return;
     }
     finishWorker();
     const secs = ((data.ms ?? performance.now() - t0) / 1000).toFixed(2);
     if (data.type === "done") showSolution(L, data, secs);
     else if (data.type === "blocked") setStatus(data.message + " Fix the level in Edit mode.", "err");
-    else if (data.type === "none") setStatus(`No solution. Searched ${data.nodes.toLocaleString()} states in ${secs}s.${L.maxLen ? " Try raising Max moves." : ""}`, "err");
-    else if (data.type === "limit") setStatus(`Stopped after ${data.nodes.toLocaleString()} states (paths up to ${data.depth} moves) without a solution. Raise the state limit to search further.`, "err");
+    else if (data.type === "none") setStatus(`No solution. Searched ${data.nodes.toLocaleString()} states in ${secs}s.${L.maxLen ? " Try raising Max time steps." : ""}`, "err");
+    else if (data.type === "limit") setStatus(`Stopped after ${data.nodes.toLocaleString()} states (up to ${data.depth} ${L.players > 1 ? "time steps" : "moves"}) without a solution. Raise the state limit to search further.`, "err");
     else setStatus("Solver error: " + data.message, "err");
   };
   worker.onerror = (e) => { finishWorker(); setStatus("Solver error: " + e.message, "err"); };
@@ -1177,18 +1377,38 @@ function finishWorker() {
   $("solve").disabled = false; $("cancel").hidden = true;
 }
 
+// The cells a path runs through, from its start.
+function pathCells(origin, dirs) {
+  const out = [origin];
+  let p = origin;
+  for (const d of dirs) { p += Engine.OFF[d]; out.push(p); }
+  return out;
+}
+
 function showSolution(L, data, secs) {
   let r0 = 0, c0 = 0, r1 = M.h - 1, c1 = M.w - 1;
   for (const f of data.frames) for (const p of f.pos) {
     const [r, c] = dec(p);
     r0 = Math.min(r0, r); c0 = Math.min(c0, c); r1 = Math.max(r1, r); c1 = Math.max(c1, c);
   }
-  sol = { path: data.path, frames: data.frames, elems: L.elems, electrons: L.electrons, init: L.pos, origin: L.pos[0], bounds: { r0, c0, r1, c1 } };
+  const P = L.players;
+  sol = { P, paths: data.paths, ticks: data.ticks, moves: data.moves, moveTicks: data.moveTicks, frames: data.frames,
+    cells: data.full.map((dirs, m) => pathCells(L.pos[m], dirs)), elems: L.elems, electrons: L.electrons, init: L.pos,
+    bounds: { r0, c0, r1, c1 } };
   cur = 0;
-  const arrows = [...data.path].map((d) => ARROW[d]).join("");
-  setStatus(`<b>Solved in ${data.path.length} moves</b> (${data.nodes.toLocaleString()} states, ${secs}s)<div class="solution">${data.path}<br>${arrows}</div>`, "ok");
-  $("moves").innerHTML = [...data.path].map((d, i) => `<button class="move" data-i="${i + 1}" title="Move ${i + 1}: ${d}"><small>${i + 1}</small>${ARROW[d]}</button>`).join("");
-  $("scrub").max = data.path.length;
+  const steps = P > 1 ? `, ${data.ticks} time steps` : "";
+  const lines = data.paths.map((p, m) => `${P > 1 ? `<span class="swatch" style="background:${PATHC[m]}"></span>` : ""}${p}<br>${[...p].map((d) => ARROW[d]).join("")}`);
+  setStatus(`<b>Solved in ${data.moves} moves${steps}</b> (${data.nodes.toLocaleString()} states, ${secs}s)<div class="solution">${lines.join("<br>")}</div>`, "ok");
+  // One row of moves per path; each move is labelled with the time step it happens in.
+  $("moves").innerHTML = `<div class="pathrows">${data.full.map((dirs, m) => {
+    const auto = L.startDirs[m] ? 1 : 0;
+    const chips = [...dirs].map((d, k) => {
+      const t = data.moveTicks[m][k];
+      return `<button class="move${k < auto ? " auto" : ""}" data-i="${t}" title="${k < auto ? "Automatic first step" : `Move ${k + 1 - auto}`}, time step ${t}"><small>${t}</small>${ARROW[d]}</button>`;
+    }).join("");
+    return `<div class="pathrow">${P > 1 ? `<span class="swatch" style="background:${PATHC[m]}"></span>` : ""}${chips}</div>`;
+  }).join("")}</div>`;
+  $("scrub").max = data.ticks;
   $("result-panel").hidden = false;
   go(0);
 }
@@ -1197,7 +1417,7 @@ function go(i) {
   if (!sol) return;
   cur = Math.max(0, Math.min(sol.frames.length - 1, i));
   $("scrub").value = cur;
-  $("steplabel").textContent = `${cur} / ${sol.path.length}`;
+  $("steplabel").textContent = `${cur} / ${sol.ticks}`;
   document.querySelectorAll(".move").forEach((b) => {
     const k = +b.dataset.i;
     b.classList.toggle("cur", k === cur);
@@ -1213,17 +1433,22 @@ function stopPlay() {
 function togglePlay() {
   if (!sol) return;
   if (playTimer) { stopPlay(); return; }
-  if (cur >= sol.path.length) go(0);
+  if (cur >= sol.ticks) go(0);
   $("play").textContent = "Pause";
   playTimer = setInterval(() => {
-    if (cur >= sol.path.length) { stopPlay(); return; }
+    if (cur >= sol.ticks) { stopPlay(); return; }
     go(cur + 1);
   }, 420);
 }
 
 /* ---------- try mode ---------- */
 const DIRNAME = { U: "up", D: "down", L: "left", R: "right" };
+const last = (a) => a[a.length - 1];
 
+// game: { L, G, P, paths: each start's moves (forced first steps included),
+// auto: how many of them are forced, hist: which path each drawn step went to
+// (for undo), sel: the path being drawn, sim: the paths replayed, tick: the
+// time step shown }.
 function startGame() {
   let L, G;
   try {
@@ -1236,66 +1461,95 @@ function startGame() {
     $("undo").disabled = $("restart").disabled = true;
     $("trycount").textContent = "";
     $("trypath").textContent = "";
+    $("molsel").hidden = true;
     return;
   }
-  game = { L, G, stack: [{ s: G.start, v: G.visited0 }], path: "", states: [G.start], bounds: null, over: false, won: false };
+  const paths = L.startDirs.map((d) => d || "");
+  game = { L, G, P: L.players, paths, auto: paths.map((q) => q.length), hist: [], sel: 0, bounds: null, over: false, won: false };
   afterTryChange();
 }
 
-// Where the path would go in direction d, and the resulting state if the move is legal.
+const tryCells = (m) => pathCells(game.L.pos[m], game.paths[m]);
+// A path has ended once it reaches an exit (a loop's start doesn't count until it comes back).
+const pathEnded = (m) => { const cells = tryCells(m); return cells.length > 1 && game.G.exitIdx.has(last(cells)); };
+
+// Path bits used by every drawn path, plus the tiles no path may use.
+function usedBits() {
+  const { G } = game;
+  let used = G.visited0;
+  game.paths.forEach((dirs, m) => {
+    const cells = tryCells(m);
+    [...dirs].forEach((d, k) => { if (!G.exitIdx.has(cells[k + 1])) used |= G.pathBit(cells[k + 1], d); });
+  });
+  return used;
+}
+
+// Whether the selected path can go one step in direction d, and the result if so.
 function checkMove(d) {
-  const { G, L, stack } = game;
-  const { s, v } = stack[stack.length - 1];
-  const lead = s.pos[0] + Engine.OFF[d];
-  if (G.ended(s)) return { lead, reason: "" }; // the path has ended: further moves are ignored
-  if (G.cross.has(s.pos[0])) {
-    const heading = game.path ? game.path[game.path.length - 1] : G.startHeading;
-    if (d !== heading) return { lead, reason: "The path has to go straight on over a crossing." };
+  const { G, L } = game, m = game.sel, dirs = game.paths[m], tip = last(tryCells(m));
+  const lead = tip + Engine.OFF[d];
+  if (pathEnded(m)) return { lead, reason: "" }; // this path has ended: further moves are ignored
+  if (G.cross.has(tip) && dirs && d !== last(dirs)) return { lead, reason: "Paths have to go straight on over a crossing." };
+  const e = G.exitIdx.get(lead);
+  if (e !== undefined) {
+    if (L.exitDirs[e] && d !== L.exitDirs[e]) return { lead, reason: `This exit has to be entered going ${DIRNAME[L.exitDirs[e]]}.` };
+    if (game.paths.some((_, k) => k !== m && pathEnded(k) && last(tryCells(k)) === lead)) return { lead, reason: "Another path already ends at this exit." };
+  } else {
+    const b = G.pathBit(lead, d);
+    if (b === undefined) return { lead, reason: "Paths have to stay on level tiles." };
+    if (usedBits() & b) {
+      if (G.cross.has(lead)) return { lead, reason: "A path already crosses here in that direction." };
+      if (G.origins.includes(lead)) return { lead, reason: "Paths can't go over a start." };
+      if (L.pos.includes(lead)) return { lead, reason: "Paths can't cross a tile where an atom started." };
+      if (L.electrons.some((x) => x.p === lead)) return { lead, reason: "Paths can't cross a tile where an electron started." };
+      return { lead, reason: game.P > 1 ? "Paths can't cross themselves or each other." : "The path can't cross itself." };
+    }
   }
-  const b = G.pathBit(lead, d);
-  if (b === undefined) return { lead, reason: "The path has to stay on level tiles." };
-  if (v & b) {
-    if (G.cross.has(lead)) return { lead, reason: "The path already crosses here in that direction." };
-    if (lead === L.pos[0]) return { lead, reason: "The path can't go back over the start." };
-    if (L.pos.includes(lead)) return { lead, reason: "The path can't cross a tile where an atom started." };
-    if (L.electrons.some((e) => e.p === lead)) return { lead, reason: "The path can't cross a tile where an electron started." };
-    return { lead, reason: "The path can't cross itself." };
+  const paths = game.paths.slice();
+  paths[m] += d;
+  const sim = G.simulate(paths);
+  if (sim.error) {
+    const what = sim.why === "electron" ? "An electron is in the way" : sim.why === "atom" ? "An atom is in the way" : "Two molecules would collide";
+    return { lead, reason: game.P > 1 ? `${what} at time step ${sim.error}.` : `${what}.` };
   }
-  if (lead === G.E && L.exitDir && d !== L.exitDir) return { lead, reason: `The exit has to be entered going ${DIRNAME[L.exitDir]}.` };
-  const next = G.step(s, Engine.OFF[d]);
-  if (!next) {
-    const hitsElectron = L.electrons.some((e, k) => s.elec[k] && s.pos.some((p, i) => (s.mol >> i & 1) && p + Engine.OFF[d] === e.p));
-    return { lead, reason: hitsElectron ? "An electron is in the way." : "An atom is in the way." };
-  }
-  return { lead, next, nv: v | b };
+  return { ok: true, lead, paths };
 }
 
 function tryMove(d) {
   if (!game) return;
-  const { stack } = game;
+  const m = game.sel, cells = tryCells(m);
   // Stepping back onto the previous tile erases the last step, like redrawing the path.
-  if (stack.length > 1 && stack[stack.length - 1].s.pos[0] + Engine.OFF[d] === stack[stack.length - 2].s.pos[0]) {
-    tryUndo();
+  if (game.paths[m].length > game.auto[m] && last(cells) + Engine.OFF[d] === cells[cells.length - 2]) {
+    game.paths[m] = game.paths[m].slice(0, -1);
+    game.hist.splice(game.hist.lastIndexOf(m), 1);
+    afterTryChange();
     return;
   }
-  const m = checkMove(d);
-  if (!m.next) { if (m.reason) tryMessage(m.reason, "err"); return; }
-  stack.push({ s: m.next, v: m.nv });
-  game.path += d;
+  const r = checkMove(d);
+  if (!r.ok) { if (r.reason) tryMessage(r.reason, "err"); return; }
+  game.paths = r.paths;
+  game.hist.push(m);
   afterTryChange();
 }
 
 function tryUndo() {
-  if (!game || game.stack.length < 2) return;
-  game.stack.pop();
-  game.path = game.path.slice(0, -1);
+  if (!game || !game.hist.length) return;
+  const m = game.hist.pop();
+  game.paths[m] = game.paths[m].slice(0, -1);
+  game.sel = m;
   afterTryChange();
 }
 
 function tryRestart() {
   if (!game) return;
-  game.stack.length = 1;
-  game.path = "";
+  game.paths = game.L.startDirs.map((d) => d || "");
+  game.hist = [];
+  afterTryChange();
+}
+
+function selectPath(m) {
+  if (!game || m < 0 || m >= game.P || m === game.sel) return;
+  game.sel = m;
   afterTryChange();
 }
 
@@ -1306,38 +1560,50 @@ function tryMessage(html, kind = "") {
 }
 
 function afterTryChange() {
-  const { G, stack, path } = game;
-  const s = stack[stack.length - 1].s;
-  game.states = stack.map((x) => x.s);
+  const { G, P } = game;
+  game.sim = G.simulate(game.paths);
+  const frames = game.sim.frames, final = last(frames);
+  // Show every molecule at the time step the selected one reaches the end of its path.
+  game.tick = game.sim.error ? frames.length - 1 : game.sim.tip[game.sel];
   // One cell of room around the level for atoms hanging off the edge. The view
   // only grows, so the board doesn't jump if a molecule reaches further.
   const b = game.bounds || { r0: -1, c0: -1, r1: M.h, c1: M.w };
-  for (const p of s.pos) {
+  for (const f of frames) for (const p of f.pos) {
     const [r, c] = dec(p);
     b.r0 = Math.min(b.r0, r); b.c0 = Math.min(b.c0, c); b.r1 = Math.max(b.r1, r); b.c1 = Math.max(b.c1, c);
   }
   game.bounds = b;
-  game.over = G.ended(s);
-  const left = leftText(G, s);
-  const won = game.won = game.over && G.isWin(s);
-  $("trycount").textContent = `${path.length} move${path.length === 1 ? "" : "s"}`;
-  $("trypath").textContent = [...path].map((d) => ARROW[d]).join("");
-  $("undo").disabled = stack.length < 2;
-  $("restart").disabled = stack.length < 2;
+  game.over = game.paths.every((_, m) => pathEnded(m));
+  const won = game.won = game.over && G.isWin(final);
+  const moves = game.paths.reduce((t, q, m) => t + q.length - game.auto[m], 0), ticks = frames.length - 1;
+  $("trycount").textContent = P > 1 ? `${moves} move${moves === 1 ? "" : "s"} · ${ticks} time step${ticks === 1 ? "" : "s"}` : `${moves} move${moves === 1 ? "" : "s"}`;
+  $("trypath").innerHTML = game.paths.map((q, m) => (P > 1 ? `<span class="swatch" style="background:${PATHC[m]}"></span> ` : "") +
+    [...q.slice(game.auto[m])].map((d) => ARROW[d]).join("")).join("<br>");
+  $("undo").disabled = $("restart").disabled = !game.hist.length;
+  $("molsel").hidden = P < 2;
+  $("molsel").innerHTML = P < 2 ? "" : game.paths.map((_, m) =>
+    `<button class="btn" data-m="${m}" aria-pressed="${m === game.sel}" style="${m === game.sel ? `background:${PATHC[m]}` : ""}"><span class="swatch" style="background:${m === game.sel ? "var(--bg)" : PATHC[m]}"></span>Path ${m + 1}${pathEnded(m) ? " ✓" : ""}</button>`).join("");
 
-  if (won) {
+  const left = leftText(G, final);
+  if (game.sim.error) {
+    tryMessage("The starts' first steps collide, so the level can't be played. Fix it in Edit mode.", "err");
+  } else if (won) {
     let extra = "";
-    if (sol) extra = sol.path.length < path.length ? ` The shortest solution takes ${sol.path.length}.` : " That's the shortest possible.";
-    tryMessage(`<b>Solved in ${path.length} moves!</b>${extra}`, "win");
+    if (sol && P === 1) extra = sol.moves < moves ? ` The shortest solution takes ${sol.moves}.` : " That's the shortest possible.";
+    if (sol && P > 1) extra = sol.ticks < ticks ? ` The fastest solution takes ${sol.ticks} time steps.` : " That's the fastest possible.";
+    tryMessage(`<b>Solved in ${moves} moves${P > 1 ? ` and ${ticks} time steps` : ""}!</b>${extra}`, "win");
   } else if (game.over) {
-    tryMessage(left
-      ? `You reached the exit with ${left} left. Undo and try another route.`
-      : "Part of the molecule is outside the level. Undo and try another route.", "err");
-  } else if (!G.canFinish(s)) {
+    const loose = final.mid.some((x) => x < 0);
+    const where = P > 1 ? "Every path reached an exit" : "You reached the exit";
+    tryMessage(left ? `${where} with ${left} left. Undo and try another route.`
+      : loose ? `${where}, but some atoms aren't part of a molecule. Undo and try another route.`
+      : `Part of a molecule is outside the level. Undo and try another route.`, "err");
+  } else if (!G.canFinish(final)) {
     tryMessage("Not all free electrons can be used from here. Undo or restart.", "err");
+  } else if (!left) {
+    tryMessage(P > 1 ? "Every atom is settled. Take every path to an exit." : "Every atom is settled. Head to the exit.");
   } else {
-    tryMessage(!left ? "Every atom is settled. Head to the exit."
-      : path.length ? `${left} left on the board.` : `Draw a path to the exit. ${left} to use up.`);
+    tryMessage(moves ? `${left} left on the board.` : P > 1 ? `Draw a path from each start to an exit. ${left} to use up.` : `Draw a path to the exit. ${left} to use up.`);
   }
   draw();
 }
@@ -1351,11 +1617,16 @@ function leftText(G, s) {
   return parts.join(" and ");
 }
 
-// Try mode on the board: dragging or clicking into a tile next to the atom moves it there.
-function tryPointer(e) {
+// Try mode on the board: pressing a path's end selects that path; dragging or
+// clicking into a tile next to the selected path's end extends it there.
+function tryPointer(e, pressed) {
   const [r, c] = cellAt(e);
-  const s = game.stack[game.stack.length - 1].s;
-  const [lr, lc] = dec(s.pos[0]);
+  const p = enc(r, c);
+  if (pressed) {
+    const m = game.paths.findIndex((_, k) => last(tryCells(k)) === p);
+    if (m >= 0 && m !== game.sel) { selectPath(m); return; }
+  }
+  const [lr, lc] = dec(last(tryCells(game.sel)));
   for (const d of Engine.DK) {
     if (lr + DIRV[d][0] === r && lc + DIRV[d][1] === c) { tryMove(d); return; }
   }
@@ -1426,13 +1697,10 @@ function init() {
   $("clearYes").addEventListener("click", () => {
     askClear(false);
     M.cells = M.cells.map(() => blankCell());
-    M.startDir = ""; M.exitDir = "";
     modelChanged();
   });
   $("w").addEventListener("change", () => resize(+$("w").value, M.h));
   $("h").addEventListener("change", () => resize(M.w, +$("h").value));
-  $("startDir").addEventListener("change", (e) => { M.startDir = e.target.value; modelChanged(); });
-  $("exitDir").addEventListener("change", (e) => { M.exitDir = e.target.value; modelChanged(); });
 
   const board = $("board");
   let painting = false;
@@ -1447,13 +1715,13 @@ function init() {
     if (!boardActive(e)) return;
     painting = true;
     board.setPointerCapture(e.pointerId);
-    if (mode === "try") { tryPointer(e); return; }
+    if (mode === "try") { tryPointer(e, true); return; }
     const [r, c] = cellAt(e);
     if (applyTool(r, c)) modelChanged();
   });
   board.addEventListener("pointermove", (e) => {
     if (!painting) return;
-    if (mode === "try") { tryPointer(e); return; }
+    if (mode === "try") { tryPointer(e, false); return; }
     if (!["floor", "void", "erase"].includes(tool)) return;
     const [r, c] = cellAt(e);
     if (applyTool(r, c)) modelChanged();
@@ -1478,6 +1746,10 @@ function init() {
     if (b) setMode(b.dataset.mode);
   });
   $("undo").addEventListener("click", tryUndo);
+  $("molsel").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-m]");
+    if (b) selectPath(+b.dataset.m);
+  });
   $("restart").addEventListener("click", tryRestart);
   document.querySelector(".dpad").addEventListener("click", (e) => {
     const b = e.target.closest("[data-dir]");
@@ -1492,6 +1764,8 @@ function init() {
       else if (k === "z" || k === "Backspace") tryUndo();
       else if (k === "r") tryRestart();
       else if (k === "Escape") setMode("edit");
+      else if (game && k >= "1" && k <= "4") selectPath(+k - 1);
+      else if (game && k === "Tab" && game.P > 1) selectPath((game.sel + (e.shiftKey ? game.P - 1 : 1)) % game.P);
       else return;
       e.preventDefault();
       return;

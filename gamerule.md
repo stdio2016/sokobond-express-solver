@@ -84,3 +84,30 @@ Anything that could capture from, or be captured by, an ambiguous ion or cell is
 ambiguous too (this spreads). The other ions each capture one electron from
 every cell they touch, all at the same time.
 * Some atoms and electrons start on holes instead of level tiles.
+
+## Rotators
+
+* A rotator sits on a grid corner (where four cells meet), drawn as an asterisk.
+Since molecules can go off the grid, rotators can also sit on the grid's
+boundary corners.
+* As a molecule moves, each bond that lies across the direction its nearer atom
+moves (nearer to the player along the molecule) sweeps over the grid corner
+beside it. If that corner has a rotator, the bond is turned around it: the
+farther atom, and everything attached through it, moves into the nearer atom's
+old cell instead of following. Directions are worked out outward from the
+player, nearest bond first, each using the direction its nearer atom just got,
+so one rotator can turn several bonds in one move.
+* Example (player p, rotator * between 2, p, 5 and 6), moving down:
+
+      From:          To:
+        1              1
+        |              |
+        2-p-3      4-5-2
+        |*           |*|
+      4-5-6          6 p-3
+          |          |
+          7          7
+
+  p and 3 move down, 1 and 2 move right, 4 and 5 move up, 6 and 7 move left.
+* Turning happens during the move and takes no extra time; capture and bonding
+happen afterwards as usual.

@@ -275,6 +275,7 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
             <dt>[H#] [-#]</dt><dd># inside brackets: starts on a hole, not a tile</dd>
             <dt>[oE]</dt><dd>a start on an exit: its path can be a loop</dd>
             <dt>h o n c</dt><dd>up to 4 starts (lowercase atoms), each with its own molecule, and as many exits</dd>
+            <dt>rotators: 2,3</dt><dd>rotators on grid corners (row,column of a corner; 0,0 is the top-left corner of the grid, boundary corners allowed)</dd>
             <dt>valence: X=2</dt><dd>add a new element</dd>
           </dl>
         </details>
@@ -462,6 +463,46 @@ function makeEngine(L) {
     return occ;
   }
 
+  // Rotators sit on grid corners (coded like the cell whose top-left corner
+  // they are). Which way each atom of a moving molecule goes: the player takes
+  // its path's step, and directions spread outward along bonds, nearest to the
+  // player first. A bond perpendicular to its nearer atom's movement sweeps
+  // across the corner beside it; if a rotator is there, the farther atom (and
+  // what hangs from it) turns to move into the nearer atom's old cell instead
+  // of following. Otherwise it moves the same way as the nearer atom.
+  const rot = new Set(L.rotators || []);
+  function atomDirs(s, dirs) {
+    const ad = new Array(n).fill(null);
+    let nbrs = null;
+    for (let m = 0; m < P; m++) {
+      if (!dirs[m]) continue;
+      ad[m] = dirs[m];
+      if (!rot.size) { for (let i = 0; i < n; i++) if (s.mid[i] === m) ad[i] = dirs[m]; continue; }
+      if (!nbrs) {
+        nbrs = Array.from({ length: n }, () => []);
+        for (const [i, j] of s.bonds) if (!nbrs[i].includes(j)) { nbrs[i].push(j); nbrs[j].push(i); }
+      }
+      const queue = [m];
+      for (let h = 0; h < queue.length; h++) {
+        const a = queue[h], da = ad[a];
+        for (const b of nbrs[a]) {
+          if (ad[b] || s.mid[b] !== m) continue;
+          const diff = s.pos[b] - s.pos[a];
+          const e = diff === OFF.U ? "U" : diff === OFF.D ? "D" : diff === OFF.L ? "L" : "R";
+          let db = da;
+          if ((e === "L" || e === "R") && (da === "U" || da === "D")) {
+            if (rot.has(Math.max(s.pos[a], s.pos[b]) + (da === "D" ? STRIDE : 0))) db = OPP[e];
+          } else if ((e === "U" || e === "D") && (da === "L" || da === "R")) {
+            if (rot.has(Math.max(s.pos[a], s.pos[b]) + (da === "R" ? 1 : 0))) db = OPP[e];
+          }
+          ad[b] = db;
+          queue.push(b);
+        }
+      }
+    }
+    return ad;
+  }
+
   // One time step: dirs[m] is molecule m's move ("U".."R") or null to stay.
   // Atoms can't move into anything standing still, and two atoms can't end in
   // the same cell. Between moving molecules, the rest depends on directions:
@@ -471,16 +512,16 @@ function makeEngine(L) {
   // molecule is leaving sideways is fine. Returns null on a collision; `why`,
   // if given, is told what was hit.
   function step(s, dirs, why) {
+    const ad = atomDirs(s, dirs);
     const fixed = new Map(), from = new Map();
     for (let i = 0; i < n; i++) {
-      const m = s.mid[i], d = m >= 0 ? dirs[m] : null;
-      if (d) from.set(s.pos[i], d); else fixed.set(s.pos[i], "atom");
+      if (ad[i]) from.set(s.pos[i], ad[i]); else fixed.set(s.pos[i], "atom");
     }
     L.electrons.forEach((e, k) => { if (s.elec[k]) fixed.set(e.p, "electron"); });
     const pos = s.pos.slice(), into = new Set();
     let moved = 0;
     for (let i = 0; i < n; i++) {
-      const m = s.mid[i], d = m >= 0 ? dirs[m] : null;
+      const m = s.mid[i], d = ad[i];
       if (!d) continue;
       const t = s.pos[i] + OFF[d], f = from.get(t);
       if (fixed.has(t)) { if (why) why.kind = fixed.get(t); return null; }
@@ -513,6 +554,10 @@ function makeEngine(L) {
     return false;
   }
 
+  // Atoms of molecule m that still have free electrons or charge. With rotators
+  // a molecule's shape can change, so two of them may still meet and bond.
+  const openAtoms = (s, m) => { let t = 0; for (let i = 0; i < n; i++) if (s.mid[i] === m && (s.free[i] || s.charge[i])) t++; return t; };
+
   // Can every atom still end in a molecule, neutral, with no free electrons?
   // Only molecules bond or capture, a loose atom only joins by bonding, and
   // molecules never merge, so each molecule has to settle on its own.
@@ -524,7 +569,7 @@ function makeEngine(L) {
     for (let m = 0; m < P; m++) {
       if (!potential(s, m)) continue;
       open = true;
-      if (!lf && !ringPending(s, m)) return false;  // nothing left to bond with it
+      if (!lf && !ringPending(s, m) && !(rot.size && openAtoms(s, m) >= 2)) return false;  // nothing left to bond with it
     }
     return !(lf && !open);                           // loose atoms nothing can bond with
   }
@@ -705,7 +750,8 @@ function solve(L) {
   const seen = new Map();
   const queue = [[start, words0, new Array(P).fill(""), 0]];
   let best = null, bestTicks = Infinity, nodes = 0, depth = 0;
-  const shortcut = P === 1 && !cross.size;
+  // (Rotators can change a molecule's shape, so the fixed-shape shortcut is off.)
+  const shortcut = P === 1 && !cross.size && !(L.rotators && L.rotators.length);
   for (let h = 0; h < queue.length; h++) {
     const [s, v, paths, ticks] = queue[h];
     queue[h] = undefined;
@@ -838,6 +884,7 @@ const SAMPLES = [
   { name: "Double charge", text: "start=R\nexit=R\n...[--#]...\n[o++]......E\n.H....H....\n..........." },
   { name: "Crossing", text: "exit=D\n.....\n.#.#.\nh.+..\n##.#H\n##E##\n##.##" },
   { name: "Loop", text: "..H..\n.....\nH.[cE].H\n.....\n..H.." },
+  { name: "Rotator", text: "exit=R\nrotators: 1,1\nh....\nH....\n....E\n#####" },
 ];
 
 const TOOLS = [
@@ -845,6 +892,7 @@ const TOOLS = [
   { id: "void", label: "Hole", icon: '<span class="sq void"></span>' },
   { id: "exit", label: "Exit", icon: "⇥" },
   { id: "cross", label: "Crossing", icon: "✚" },
+  { id: "rotator", label: "Rotator", icon: "✱" },
   { sep: true },
   { id: "H", label: "H", el: true },
   { id: "O", label: "O", el: true },
@@ -929,7 +977,7 @@ function parseCell(tok, known, r, c) {
 }
 
 function parseLevel(text) {
-  const valence = {};
+  const valence = {}, rotators = [];
   let startDir = "", exitDir = "";
   const rows = [];
   for (const raw of text.replace(/\r/g, "").split("\n")) {
@@ -938,6 +986,15 @@ function parseLevel(text) {
       const d = m[2].toUpperCase();
       if (d && d !== "ANY" && !DIRV[d]) throw new Error(`"${raw.trim()}": use U, D, L or R.`);
       if (m[1].toLowerCase() === "start") startDir = DIRV[d] ? d : ""; else exitDir = DIRV[d] ? d : "";
+      continue;
+    }
+    // rotators: r,c r,c ... (grid corners; corner r,c is the top-left corner of cell r,c)
+    if ((m = raw.match(/^\s*rotators?\s*[:=]\s*(.*)$/i))) {
+      for (const part of m[1].split(/[;\s]+/).filter(Boolean)) {
+        const mm = part.match(/^(\d+),(\d+)$/);
+        if (!mm) throw new Error(`"${part}" in the rotators line should look like 2,3 (row,column of a grid corner).`);
+        rotators.push([+mm[1], +mm[2]]);
+      }
       continue;
     }
     if ((m = raw.match(/^\s*valence\s*[:=]\s*(.*)$/i))) {
@@ -963,7 +1020,13 @@ function parseLevel(text) {
     if (x.atom && x.atom.player && !x.atom.dir) x.atom.dir = startDir;
     if (x.t === "exit" && !x.dir) x.dir = exitDir;
   }
-  return { w, h, cells, valence };
+  // Rotators sit on grid corners, from 0,0 to h,w (the boundary included).
+  const corners = new Set();
+  for (const [r, c] of rotators) {
+    if (r > h || c > w) throw new Error(`Rotator ${r},${c} is outside the grid; corners run from 0,0 to ${h},${w}.`);
+    corners.add(r + "," + c);
+  }
+  return { w, h, cells, valence, rotators: corners };
 }
 
 // perCell: write each start's and exit's direction in its own cell.
@@ -992,6 +1055,7 @@ function serialize(m) {
   }
   const extra = Object.entries(m.valence).filter(([k, v]) => VAL[k] !== v);
   if (extra.length) lines.push("valence: " + extra.map(([k, v]) => `${k}=${v}`).join(", "));
+  if (m.rotators.size) lines.push("rotators: " + [...m.rotators].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).join(" "));
   for (let r = 0; r < m.h; r++) {
     let s = "";
     for (let c = 0; c < m.w; c++) s += cellText(m.cells[r * m.w + c], perCell);
@@ -1028,6 +1092,7 @@ function buildLevel() {
   atoms.sort((a, b) => b.player - a.player);
   return {
     tiles, exits, exitDirs, electrons, crossings,
+    rotators: [...M.rotators].map((k) => { const [r, c] = k.split(",").map(Number); return enc(r, c); }),
     players: players.length,
     startDirs: players.map((a) => a.dir || ""),
     pos: atoms.map((a) => a.p),
@@ -1094,7 +1159,7 @@ function draw() {
   svg.parentElement.classList.toggle("won", mode === "try" && !!game && game.won);
   let r0 = 0, c0 = 0, r1 = M.h - 1, c1 = M.w - 1;
   if (sc) ({ r0, c0, r1, c1 } = sc.bounds);
-  const pad = mode === "try" ? 0 : 8;
+  const pad = mode === "try" ? 0 : mode === "edit" ? 16 : 8;
   const vx = c0 * S - pad, vy = r0 * S - pad, vw = (c1 - c0 + 1) * S + pad * 2, vh = (r1 - r0 + 1) * S + pad * 2;
   svg.setAttribute("viewBox", `${vx} ${vy} ${vw} ${vh}`);
   const out = [];
@@ -1161,6 +1226,14 @@ function draw() {
       const [r, c] = dec(m.lead);
       out.push(`<circle cx="${c * S + S / 2}" cy="${r * S + S / 2}" r="7" fill="none" stroke="${PATHC[game.sel]}" stroke-width="2.5" stroke-opacity="0.8"/>`);
     }
+  }
+
+  // rotators: asterisks on grid corners
+  for (const k of M.rotators) {
+    const [r, c] = k.split(",").map(Number), X = c * S, Y = r * S, a = 11, b = a * 0.7071;
+    const d = `M${X - a} ${Y} H${X + a} M${X} ${Y - a} V${Y + a} M${X - b} ${Y - b} L${X + b} ${Y + b} M${X - b} ${Y + b} L${X + b} ${Y - b}`;
+    out.push(`<path d="${d}" stroke="var(--panel)" stroke-width="7" stroke-linecap="round" fill="none"/>`);
+    out.push(`<path d="${d}" stroke="var(--ink)" stroke-width="3" stroke-linecap="round" fill="none"/>`);
   }
 
   // bonds and atoms
@@ -1316,15 +1389,24 @@ function resize(w, h) {
   for (let r = 0; r < h; r++) for (let c = 0; c < w; c++)
     cells.push(r < M.h && c < M.w ? M.cells[r * M.w + c] : blankCell());
   M.w = w; M.h = h; M.cells = cells;
+  M.rotators = new Set([...M.rotators].filter((k) => { const [r, c] = k.split(",").map(Number); return r <= h && c <= w; }));
   modelChanged();
 }
 
-function cellAt(evt) {
+function boardPoint(evt) {
   const svg = $("board");
   const pt = svg.createSVGPoint();
   pt.x = evt.clientX; pt.y = evt.clientY;
-  const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+  return pt.matrixTransform(svg.getScreenCTM().inverse());
+}
+function cellAt(evt) {
+  const p = boardPoint(evt);
   return [Math.floor(p.y / S), Math.floor(p.x / S)];
+}
+// The grid corner nearest the pointer (row, column), for placing rotators.
+function cornerAt(evt) {
+  const p = boardPoint(evt);
+  return [Math.round(p.y / S), Math.round(p.x / S)];
 }
 
 /* ---------- solving ---------- */
@@ -1697,6 +1779,7 @@ function init() {
   $("clearYes").addEventListener("click", () => {
     askClear(false);
     M.cells = M.cells.map(() => blankCell());
+    M.rotators = new Set();
     modelChanged();
   });
   $("w").addEventListener("change", () => resize(+$("w").value, M.h));
@@ -1707,7 +1790,9 @@ function init() {
   // Only presses that start inside the level grid paint or draw the path; the
   // margins and Solve mode leave touches to scroll the page.
   const inGrid = (e) => { const [r, c] = cellAt(e); return r >= 0 && c >= 0 && r < M.h && c < M.w; };
-  const boardActive = (e) => mode === "edit" || (mode === "try" && game) ? inGrid(e) : false;
+  // Rotators go on grid corners, the boundary included.
+  const onCorner = (e) => { const [r, c] = cornerAt(e); return r >= 0 && c >= 0 && r <= M.h && c <= M.w; };
+  const boardActive = (e) => mode === "edit" ? (tool === "rotator" ? onCorner(e) : inGrid(e)) : mode === "try" && game ? inGrid(e) : false;
   board.addEventListener("touchstart", (e) => {
     if (e.touches.length === 1 && boardActive(e.touches[0])) e.preventDefault();
   }, { passive: false });
@@ -1716,6 +1801,12 @@ function init() {
     painting = true;
     board.setPointerCapture(e.pointerId);
     if (mode === "try") { tryPointer(e, true); return; }
+    if (tool === "rotator") {
+      const k = cornerAt(e).join(",");
+      if (M.rotators.has(k)) M.rotators.delete(k); else M.rotators.add(k);
+      modelChanged();
+      return;
+    }
     const [r, c] = cellAt(e);
     if (applyTool(r, c)) modelChanged();
   });

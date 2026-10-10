@@ -470,34 +470,94 @@ function makeEngine(L) {
   // across the corner beside it; if a rotator is there, the farther atom (and
   // what hangs from it) turns to move into the nearer atom's old cell instead
   // of following. Otherwise it moves the same way as the nearer atom.
+  // A ring of four bonded atoms around a rotator turns as a whole: when the
+  // first of its atoms to get a direction moves into the next cell of the
+  // ring, every atom of the ring moves on one cell the same way round. If it
+  // moves out of the ring instead, both its ring neighbours would turn into
+  // its old cell, so the move is refused ("rotation"). In a ring, an atom can
+  // be reached along two routes; if they disagree (a rotator would turn a bond
+  // that another bond holds in place), the move is refused: "rotation" if the
+  // turning atom would hit another atom, else "torn". Returns the directions,
+  // or { why }.
   const rot = new Set(L.rotators || []);
+  // Direction of atom b, bonded to atom a that moves da.
+  function follow(s, a, b, da) {
+    const diff = s.pos[b] - s.pos[a];
+    const e = diff === OFF.U ? "U" : diff === OFF.D ? "D" : diff === OFF.L ? "L" : "R";
+    if ((e === "L" || e === "R") && (da === "U" || da === "D")) {
+      if (rot.has(Math.max(s.pos[a], s.pos[b]) + (da === "D" ? STRIDE : 0))) return OPP[e];
+    } else if ((e === "U" || e === "D") && (da === "L" || da === "R")) {
+      if (rot.has(Math.max(s.pos[a], s.pos[b]) + (da === "R" ? 1 : 0))) return OPP[e];
+    }
+    return da;
+  }
   function atomDirs(s, dirs) {
-    const ad = new Array(n).fill(null);
-    let nbrs = null;
+    const ad = new Array(n).fill(null), depth = new Array(n).fill(0);
+    let nbrs = null, ring = null;
     for (let m = 0; m < P; m++) {
       if (!dirs[m]) continue;
-      ad[m] = dirs[m];
-      if (!rot.size) { for (let i = 0; i < n; i++) if (s.mid[i] === m) ad[i] = dirs[m]; continue; }
+      if (!rot.size) { for (let i = 0; i < n; i++) if (s.mid[i] === m) ad[i] = dirs[m]; ad[m] = dirs[m]; continue; }
       if (!nbrs) {
         nbrs = Array.from({ length: n }, () => []);
         for (const [i, j] of s.bonds) if (!nbrs[i].includes(j)) { nbrs[i].push(j); nbrs[j].push(i); }
+        // Rings of four around a rotator, clockwise from the top left.
+        const at = new Map();
+        s.pos.forEach((p, i) => { if (s.mid[i] >= 0) at.set(p, i); });
+        ring = new Map();
+        for (const c of rot) {
+          const cyc = [c - STRIDE - 1, c - STRIDE, c, c - 1].map((p) => at.get(p));
+          if (cyc.some((i) => i === undefined || s.mid[i] !== s.mid[cyc[0]])) continue;
+          if (cyc.some((i, k) => !nbrs[i].includes(cyc[(k + 1) % 4]))) continue;
+          for (const i of cyc) ring.set(i, cyc);
+        }
       }
-      const queue = [m];
+      const queue = [];
+      // Give atom b direction db, turning its ring if it has one.
+      const assign = (b, db, d) => {
+        const cyc = ring.get(b);
+        if (!cyc) { ad[b] = db; depth[b] = d; queue.push(b); return true; }
+        const k = cyc.indexOf(b), t = s.pos[b] + OFF[db];
+        const turn = t === s.pos[cyc[(k + 1) % 4]] ? 1 : t === s.pos[cyc[(k + 3) % 4]] ? 3 : 0;
+        if (!turn) return false;
+        for (let h = 0; h < 4; h++) {
+          const a = cyc[h], diff = s.pos[cyc[(h + turn) % 4]] - s.pos[a];
+          ad[a] = diff === OFF.U ? "U" : diff === OFF.D ? "D" : diff === OFF.L ? "L" : "R";
+          depth[a] = d;
+          queue.push(a);
+        }
+        return true;
+      };
+      if (!assign(m, dirs[m], 0)) return { why: "rotation" };
       for (let h = 0; h < queue.length; h++) {
-        const a = queue[h], da = ad[a];
+        const a = queue[h];
         for (const b of nbrs[a]) {
           if (ad[b] || s.mid[b] !== m) continue;
-          const diff = s.pos[b] - s.pos[a];
-          const e = diff === OFF.U ? "U" : diff === OFF.D ? "D" : diff === OFF.L ? "L" : "R";
-          let db = da;
-          if ((e === "L" || e === "R") && (da === "U" || da === "D")) {
-            if (rot.has(Math.max(s.pos[a], s.pos[b]) + (da === "D" ? STRIDE : 0))) db = OPP[e];
-          } else if ((e === "U" || e === "D") && (da === "L" || da === "R")) {
-            if (rot.has(Math.max(s.pos[a], s.pos[b]) + (da === "R" ? 1 : 0))) db = OPP[e];
-          }
-          ad[b] = db;
-          queue.push(b);
+          if (!assign(b, follow(s, a, b, ad[a]), depth[a] + 1)) return { why: "rotation" };
         }
+      }
+    }
+    // Every bond (outside a turning ring) has to agree with the direction its
+    // nearer atom gives the farther one; with equal distances, both ways. On a
+    // disagreement, if either direction would land an atom where another one
+    // ends up, that's a collision ("rotation"); otherwise the bond is torn.
+    if (rot.size) {
+      const clash = (a, b) => {
+        const want = follow(s, a, b, ad[a]);
+        if (want === ad[b]) return null;
+        const into = new Map();
+        for (let k = 0; k < n; k++) {
+          if (!ad[k]) continue;
+          const t = s.pos[k] + OFF[ad[k]];
+          if (into.has(t)) return { why: "rotation" };
+          into.set(t, k);
+        }
+        const t = s.pos[b] + OFF[want];
+        return into.has(t) && into.get(t) !== b ? { why: "rotation" } : { why: "torn" };
+      };
+      for (const [i, j] of s.bonds) {
+        if (!ad[i] || (ring.has(i) && ring.get(i) === ring.get(j))) continue;
+        const c = (depth[i] <= depth[j] && clash(i, j)) || (depth[j] <= depth[i] && clash(j, i));
+        if (c) return c;
       }
     }
     return ad;
@@ -510,23 +570,26 @@ function makeEngine(L) {
   // movement were continuous, so they can't swap places; perpendicular moves
   // only compare the cells before and after, so moving into a cell another
   // molecule is leaving sideways is fine. Returns null on a collision; `why`,
-  // if given, is told what was hit.
+  // if given, is told what was hit ("rotation" when atoms of one molecule
+  // would collide, "torn" when a rotation would tear a bond).
   function step(s, dirs, why) {
     const ad = atomDirs(s, dirs);
+    if (ad.why) { if (why) why.kind = ad.why; return null; }
     const fixed = new Map(), from = new Map();
     for (let i = 0; i < n; i++) {
-      if (ad[i]) from.set(s.pos[i], ad[i]); else fixed.set(s.pos[i], "atom");
+      if (ad[i]) from.set(s.pos[i], i); else fixed.set(s.pos[i], "atom");
     }
     L.electrons.forEach((e, k) => { if (s.elec[k]) fixed.set(e.p, "electron"); });
-    const pos = s.pos.slice(), into = new Set();
+    const pos = s.pos.slice(), into = new Map();
     let moved = 0;
     for (let i = 0; i < n; i++) {
       const m = s.mid[i], d = ad[i];
       if (!d) continue;
       const t = s.pos[i] + OFF[d], f = from.get(t);
       if (fixed.has(t)) { if (why) why.kind = fixed.get(t); return null; }
-      if (into.has(t) || (f !== undefined && f === OPP[d])) { if (why) why.kind = "molecules"; return null; }
-      into.add(t);
+      const hit = into.has(t) ? into.get(t) : f !== undefined && ad[f] === OPP[d] ? f : -1;
+      if (hit >= 0) { if (why) why.kind = s.mid[hit] === m ? "rotation" : "molecules"; return null; }
+      into.set(t, i);
       pos[i] = t;
       moved |= 1 << m;
     }
@@ -1591,7 +1654,8 @@ function checkMove(d) {
   paths[m] += d;
   const sim = G.simulate(paths);
   if (sim.error) {
-    const what = sim.why === "electron" ? "An electron is in the way" : sim.why === "atom" ? "An atom is in the way" : "Two molecules would collide";
+    const what = sim.why === "electron" ? "An electron is in the way" : sim.why === "atom" ? "An atom is in the way" :
+      sim.why === "rotation" ? "Atoms would collide by rotation" : sim.why === "torn" ? "The rotation would tear a bond apart" : "Two molecules would collide";
     return { lead, reason: game.P > 1 ? `${what} at time step ${sim.error}.` : `${what}.` };
   }
   return { ok: true, lead, paths };

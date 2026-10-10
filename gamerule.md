@@ -109,5 +109,24 @@ so one rotator can turn several bonds in one move.
           7          7
 
   p and 3 move down, 1 and 2 move right, 4 and 5 move up, 6 and 7 move left.
+* A bond can't be torn apart by turning. In a ring, an atom is reached along
+two routes; if a rotator would turn a bond that another bond holds in place,
+the move is refused. If either route would land an atom where another atom
+ends up, Try mode reports it as atoms colliding by rotation; otherwise as a
+torn bond. (This can't happen in Sokobond Express; the rule follows the original
+Sokobond.)
+* Exception: a ring of four bonded atoms around a rotator (the four cells
+touching it) turns as a whole. When the first of its atoms to move steps into
+the next cell of the ring, every ring atom moves on one cell the same way round:
+
+      1-2
+      |*|
+      4-3
+
+  If 1 moves down, 2 moves left, 3 moves up and 4 moves right. If 1 moves up
+  (out of the ring), 2 and 4 would both turn into 1's old cell, so the move is
+  refused.
+* Atoms of one molecule colliding through turning refuse the move too. Try mode
+says "Atoms would collide by rotation" for these.
 * Turning happens during the move and takes no extra time; capture and bonding
 happen afterwards as usual.

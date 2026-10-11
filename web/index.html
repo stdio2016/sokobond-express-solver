@@ -218,7 +218,7 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
               <button class="btn" id="undo">Undo</button>
               <button class="btn" id="restart">Restart</button>
             </div>
-            <p class="hint">Drag from your atom or use the arrow keys (or WASD). With several starts, press a path's end, its button, 1–4 or Tab to choose which one to draw. Step back onto a path or press Z to undo, R restarts, Esc returns to Edit.</p>
+            <p class="hint">Drag from your atom or use the arrow keys (or WASD). With several starts, press a start's atom or its path's end, its button, 1–4 or Tab to choose which one to draw. Step back onto a path or press Z to undo, R restarts, Esc returns to Edit.</p>
           </div>
         </div>
       </div>
@@ -1183,11 +1183,14 @@ const startCells = () => M.cells.map((x, k) => [x, k]).filter(([x]) => x.atom &&
 
 // What the board shows: the try-mode game, a solution being played back, or (null) the editor.
 // paths: for each molecule, the cells its path runs through; drawn: how far.
+// In try mode the rest of each path is dashed (not reached yet, or after a
+// collision), and crash marks a collision: molecules fade where they stopped.
 function scene() {
   if (mode === "try" && game) {
     const paths = game.paths.map((_, m) => tryCells(m));
+    const drawn = paths.map((_, m) => 1 + game.sim.moveTicks[m].filter((t) => t <= game.tick).length);
     return { frames: game.sim.frames, cur: game.tick, P: game.L.players, elems: game.L.elems, electrons: game.L.electrons,
-      init: game.L.pos, bounds: game.bounds, paths, drawn: paths.map((c) => c.length), ghost: false };
+      init: game.L.pos, bounds: game.bounds, paths, drawn, ghost: false, dashed: true, crash: game.crash };
   }
   if (mode === "solve" && sol) {
     const drawn = sol.cells.map((cells, m) => 1 + sol.moveTicks[m].filter((t) => t <= cur).length);
@@ -1277,6 +1280,9 @@ function draw() {
     sc.paths.forEach((cells, m) => {
       if (sc.ghost) out.push(`<polyline points="${cells.map(pt).join(" ")}" fill="none" stroke="${PATHC[m]}" stroke-opacity="0.35" stroke-width="3" stroke-dasharray="2 6" stroke-linecap="round" stroke-linejoin="round"/>`);
       const shown = Math.min(sc.drawn[m], cells.length);
+      // The dash pattern is measured from the path's start (each step is S long),
+      // so dashes stay put as the solid part grows.
+      if (sc.dashed && shown < cells.length) out.push(`<polyline points="${cells.slice(shown - 1).map(pt).join(" ")}" fill="none" stroke="${PATHC[m]}" stroke-opacity="0.7" stroke-width="6" stroke-dasharray="10 8" stroke-dashoffset="${(shown - 1) * S}" stroke-linejoin="round"/>`);
       if (shown > 1) out.push(`<polyline points="${cells.slice(0, shown).map(pt).join(" ")}" fill="none" stroke="${PATHC[m]}" stroke-opacity="0.8" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>`);
     });
   }
@@ -1307,8 +1313,7 @@ function draw() {
     const shown = sc ? e.init : e.n;
     if (!shown) continue;
     const cx = e.c * S + S / 2, cy = e.r * S + S / 2;
-    const offLevel = sc && !isTile(e.r, e.c);
-    out.push(`<g${offLevel ? ' opacity="0.55"' : ""}>`);
+    out.push("<g>");
     // Up to four electrons are drawn separately; more show a count.
     const spots = shown === 1 ? [[0, 0]] : shown === 2 ? [[-9, -9], [9, 9]] : shown === 3 ? [[0, -11], [-10, 8], [10, 8]] : [[-10, -10], [10, -10], [-10, 10], [10, 10]];
     spots.forEach(([dx, dy], k) => {
@@ -1328,6 +1333,9 @@ function draw() {
       out.push(`<text x="${cx}" y="${cy + 5.5}" text-anchor="middle" font-family="Lexend, system-ui, sans-serif" font-weight="700" font-size="16" fill="var(--used-ink)">${i < sc.P ? el.toLowerCase() : el}</text>`);
     });
   }
+  // After a collision, molecules fade where they stopped (bonds only join molecule atoms).
+  const fade = sc && sc.crash ? ' opacity="0.4"' : "";
+  out.push(`<g${fade}>`);
   const count = new Map();
   for (const [i, j] of bonds) { const k = i + "," + j; count.set(k, (count.get(k) || 0) + 1); }
   for (const [k, m] of count) {
@@ -1340,10 +1348,10 @@ function draw() {
       out.push(`<line x1="${ax + nx * o}" y1="${ay + ny * o}" x2="${bx + nx * o}" y2="${by + ny * o}" stroke="var(--ink)" stroke-width="5" stroke-linecap="round"/>`);
     }
   }
-  for (const a of atoms) {
+  out.push("</g>");
+  const drawAtom = (a, faded) => {
     const cx = a.c * S + S / 2, cy = a.r * S + S / 2;
-    const offLevel = sc && !isTile(a.r, a.c);
-    out.push(`<g${offLevel ? ' opacity="0.55"' : ""}>`);
+    out.push(`<g${faded ? ' opacity="0.4"' : ""}>`);
     // A start's atom is ringed in its path colour, other molecule atoms in ink.
     const ring = a.player ? PATHC[a.mol] : a.mol >= 0 ? "var(--ink)" : "";
     out.push(`<circle cx="${cx}" cy="${cy}" r="${R}" fill="${colorOf(a.el)}"${ring ? ` stroke="${ring}" stroke-width="3"` : ""}/>`);
@@ -1354,12 +1362,14 @@ function draw() {
       out.push(`<circle cx="${cx + Math.cos(ang) * (R + 5)}" cy="${cy + Math.sin(ang) * (R + 5)}" r="3" fill="var(--ink)"/>`);
     }
     out.push("</g>");
+  };
+  for (const a of atoms) drawAtom(a, fade && a.mol >= 0);
+  // After a collision, the selected start's atom also shows, solid, at the end of its path.
+  if (sc && sc.crash) {
+    const [r, c] = dec(last(sc.paths[game.sel]));
+    drawAtom({ ...atoms[game.sel], r, c }, false);
   }
   svg.innerHTML = out.join("");
-}
-
-function isTile(r, c) {
-  return r >= 0 && c >= 0 && r < M.h && c < M.w && M.cells[r * M.w + c].t !== "void";
 }
 
 /* ---------- editing ---------- */
@@ -1650,15 +1660,17 @@ function checkMove(d) {
       return { lead, reason: game.P > 1 ? "Paths can't cross themselves or each other." : "The path can't cross itself." };
     }
   }
+  // A move into a collision is allowed: the replay stops there and the board shows it.
   const paths = game.paths.slice();
   paths[m] += d;
-  const sim = G.simulate(paths);
-  if (sim.error) {
-    const what = sim.why === "electron" ? "An electron is in the way" : sim.why === "atom" ? "An atom is in the way" :
-      sim.why === "rotation" ? "Atoms would collide by rotation" : sim.why === "torn" ? "The rotation would tear a bond apart" : "Two molecules would collide";
-    return { lead, reason: game.P > 1 ? `${what} at time step ${sim.error}.` : `${what}.` };
-  }
   return { ok: true, lead, paths };
+}
+
+// What a replay ran into, and when.
+function collisionText(sim) {
+  const what = sim.why === "electron" ? "An electron is in the way" : sim.why === "atom" ? "An atom is in the way" :
+    sim.why === "rotation" ? "Atoms would collide by rotation" : sim.why === "torn" ? "The rotation would tear a bond apart" : "Two molecules would collide";
+  return game.P > 1 ? `${what} at time step ${sim.error}.` : `${what} on move ${sim.error - game.auto[0]}.`;
 }
 
 function tryMove(d) {
@@ -1710,7 +1722,13 @@ function afterTryChange() {
   game.sim = G.simulate(game.paths);
   const frames = game.sim.frames, final = last(frames);
   // Show every molecule at the time step the selected one reaches the end of its path.
-  game.tick = game.sim.error ? frames.length - 1 : game.sim.tip[game.sel];
+  // A collision after the selected path has ended is in its future. While the
+  // path is being dragged, only what has happened by its end is shown; the
+  // collision appears on release. Collisions before that always show.
+  const mt = game.sim.moveTicks[game.sel], selEnd = mt.length ? last(mt) : 0;
+  const future = game.sim.error && mt.length === game.paths[game.sel].length && game.sim.error > selEnd;
+  game.crash = !!game.sim.error && !(future && game.dragging);
+  game.tick = game.crash ? frames.length - 1 : selEnd;
   // One cell of room around the level for atoms hanging off the edge. The view
   // only grows, so the board doesn't jump if a molecule reaches further.
   const b = game.bounds || { r0: -1, c0: -1, r1: M.h, c1: M.w };
@@ -1720,7 +1738,7 @@ function afterTryChange() {
   }
   game.bounds = b;
   game.over = game.paths.every((_, m) => pathEnded(m));
-  const won = game.won = game.over && G.isWin(final);
+  const won = game.won = game.over && !game.sim.error && G.isWin(final);
   const moves = game.paths.reduce((t, q, m) => t + q.length - game.auto[m], 0), ticks = frames.length - 1;
   $("trycount").textContent = P > 1 ? `${moves} move${moves === 1 ? "" : "s"} · ${ticks} time step${ticks === 1 ? "" : "s"}` : `${moves} move${moves === 1 ? "" : "s"}`;
   $("trypath").innerHTML = game.paths.map((q, m) => (P > 1 ? `<span class="swatch" style="background:${PATHC[m]}"></span> ` : "") +
@@ -1731,13 +1749,19 @@ function afterTryChange() {
     `<button class="btn" data-m="${m}" aria-pressed="${m === game.sel}" style="${m === game.sel ? `background:${PATHC[m]}` : ""}"><span class="swatch" style="background:${m === game.sel ? "var(--bg)" : PATHC[m]}"></span>Path ${m + 1}${pathEnded(m) ? " ✓" : ""}</button>`).join("");
 
   const left = leftText(G, final);
-  if (game.sim.error) {
+  if (game.crash && !game.hist.length) {
     tryMessage("The starts' first steps collide, so the level can't be played. Fix it in Edit mode.", "err");
+  } else if (game.crash) {
+    tryMessage(`${collisionText(game.sim)} Undo or try another route.`, "err");
   } else if (won) {
     let extra = "";
     if (sol && P === 1) extra = sol.moves < moves ? ` The shortest solution takes ${sol.moves}.` : " That's the shortest possible.";
     if (sol && P > 1) extra = sol.ticks < ticks ? ` The fastest solution takes ${sol.ticks} time steps.` : " That's the fastest possible.";
     tryMessage(`<b>Solved in ${moves} moves${P > 1 ? ` and ${ticks} time steps` : ""}!</b>${extra}`, "win");
+  } else if (game.sim.error) {
+    // A collision hidden while dragging: describe the time step shown.
+    const now = leftText(G, frames[game.tick]);
+    tryMessage(now ? `${now} left on the board.` : "Every atom is settled.");
   } else if (game.over) {
     const loose = final.mid.some((x) => x < 0);
     const where = P > 1 ? "Every path reached an exit" : "You reached the exit";
@@ -1763,13 +1787,17 @@ function leftText(G, s) {
   return parts.join(" and ");
 }
 
-// Try mode on the board: pressing a path's end selects that path; dragging or
+// Try mode on the board: pressing a start's atom (where it's shown) or its
+// path's end selects that path; dragging or
 // clicking into a tile next to the selected path's end extends it there.
 function tryPointer(e, pressed) {
   const [r, c] = cellAt(e);
   const p = enc(r, c);
   if (pressed) {
-    const m = game.paths.findIndex((_, k) => last(tryCells(k)) === p);
+    // A start's atom where the board shows it, or its path's end.
+    const shown = game.sim.frames[game.tick].pos;
+    let m = game.paths.findIndex((_, k) => k !== game.sel && shown[k] === p);
+    if (m < 0) m = game.paths.findIndex((_, k) => last(tryCells(k)) === p);
     if (m >= 0 && m !== game.sel) { selectPath(m); return; }
   }
   const [lr, lc] = dec(last(tryCells(game.sel)));
@@ -1863,6 +1891,7 @@ function init() {
   board.addEventListener("pointerdown", (e) => {
     if (!boardActive(e)) return;
     painting = true;
+    if (mode === "try") game.dragging = true;
     board.setPointerCapture(e.pointerId);
     if (mode === "try") { tryPointer(e, true); return; }
     if (tool === "rotator") {
@@ -1881,7 +1910,11 @@ function init() {
     const [r, c] = cellAt(e);
     if (applyTool(r, c)) modelChanged();
   });
-  const stop = () => { painting = false; };
+  const stop = () => {
+    painting = false;
+    // Releasing a drag shows any collision further ahead in time.
+    if (game && game.dragging) { game.dragging = false; afterTryChange(); }
+  };
   board.addEventListener("pointerup", stop);
   board.addEventListener("pointercancel", stop);
 

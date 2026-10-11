@@ -6,7 +6,7 @@ no dependencies beyond Google Fonts). Open it directly in a browser, or use
 the published artifact.
 
 - **Live page:** https://claude.ai/artifact/Q5JArE2514RUWMDCxqH4wi
-  (private to the owner). Republish with the Artifact tool: in the session
+  (shared with anyone who has the link). Republish with the Artifact tool: in the session
   that published it, use the same `file_path`. From a new session, pass that
   URL as `url` after an `action: "read"`. Publishing without `url` creates a
   new artifact.

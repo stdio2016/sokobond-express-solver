@@ -287,6 +287,7 @@ body[data-mode="try"] .layout { grid-template-columns: minmax(0, 1fr); max-width
         <div class="row">
           <label class="field" for="maxLen">Max time steps (0 = none) <input type="number" id="maxLen" min="0" value="0"></label>
           <label class="field" for="limit">State limit <input type="number" id="limit" min="10000" step="100000" value="3000000" style="width:110px"></label>
+          <label class="field" for="timeLimit">Time limit, several starts (s) <input type="number" id="timeLimit" min="5" value="180"></label>
         </div>
         <div class="row">
           <button class="btn primary" id="solve">Solve again</button>
@@ -317,7 +318,9 @@ const OPP = { U: "D", D: "U", L: "R", R: "L" };
 function makeEngine(L) {
   const n = L.pos.length;
   const P = L.players;
-  const multi = P > 1;
+  // L.pause: one molecule planned on its own for a level with several starts,
+  // so it reacts (pauses) the way it would in the full level.
+  const multi = P > 1 || !!L.pause;
   const ALL = (1 << P) - 1;
   const exits = L.exits;
   const exitIdx = new Map(exits.map((p, k) => [p, k]));
@@ -577,18 +580,27 @@ function makeEngine(L) {
     if (ad.why) { if (why) why.kind = ad.why; return null; }
     const fixed = new Map(), from = new Map();
     for (let i = 0; i < n; i++) {
-      if (ad[i]) from.set(s.pos[i], i); else fixed.set(s.pos[i], "atom");
+      if (ad[i]) from.set(s.pos[i], i); else fixed.set(s.pos[i], i);
     }
-    L.electrons.forEach((e, k) => { if (s.elec[k]) fixed.set(e.p, "electron"); });
+    // Standing atoms by index, electron cells as -1 - k.
+    L.electrons.forEach((e, k) => { if (s.elec[k]) fixed.set(e.p, -1 - k); });
     const pos = s.pos.slice(), into = new Map();
     let moved = 0;
     for (let i = 0; i < n; i++) {
       const m = s.mid[i], d = ad[i];
       if (!d) continue;
       const t = s.pos[i] + OFF[d], f = from.get(t);
-      if (fixed.has(t)) { if (why) why.kind = fixed.get(t); return null; }
+      // `why` also gets the moving atom i, the cell, and what was there (atom j or electron cell e).
+      if (fixed.has(t)) {
+        const x = fixed.get(t);
+        if (why) Object.assign(why, x >= 0 ? { kind: "atom", j: x } : { kind: "electron", e: -1 - x }, { i, cell: t });
+        return null;
+      }
       const hit = into.has(t) ? into.get(t) : f !== undefined && ad[f] === OPP[d] ? f : -1;
-      if (hit >= 0) { if (why) why.kind = s.mid[hit] === m ? "rotation" : "molecules"; return null; }
+      if (hit >= 0) {
+        if (why) Object.assign(why, { kind: s.mid[hit] === m ? "rotation" : "molecules", i, j: hit, cell: t, swap: !into.has(t) });
+        return null;
+      }
       into.set(t, i);
       pos[i] = t;
       moved |= 1 << m;
@@ -651,6 +663,8 @@ function makeEngine(L) {
     if (b !== undefined && !(i < P && exitIdx.has(L.pos[i]))) visited0 |= b;
   }
   for (const e of L.electrons) { const b = tileBit.get(e.p); if (b !== undefined) visited0 |= b; }
+  // L.blocked: more cells paths can't use (where the full level's other things start).
+  for (const p of L.blocked || []) { const b = tileBit.get(p); if (b !== undefined && !(exitIdx.has(p) && p === L.pos[0])) visited0 |= b; }
 
   // A start with a fixed direction forces its first step.
   let startError = "";
@@ -700,7 +714,8 @@ function makeEngine(L) {
   }
 
   return { n, P, multi, ALL, exits, exitIdx, tiles, tileBit, cross, pathBit, ecell, need, looseFree, molCharge, looseCharge,
-    electronsLeft, settled, blockedCells, step, canFinish, isWin, simulate, origins, start, visited0, startError, potential };
+    electronsLeft, settled, blockedCells, step, canFinish, isWin, simulate, origins, start, visited0, startError, potential,
+    ringPending, openAtoms, rot };
 }
 
 function solve(L) {
@@ -818,7 +833,7 @@ function solve(L) {
   for (let h = 0; h < queue.length; h++) {
     const [s, v, paths, ticks] = queue[h];
     queue[h] = undefined;
-    if (++nodes > L.limit) return { type: "limit", nodes, depth };
+    if (++nodes > L.limit || (L.deadline && nodes % 512 === 0 && Date.now() > L.deadline)) return { type: "limit", nodes, depth };
     if (ticks > depth) {
       depth = ticks;
       self.postMessage({ type: "progress", nodes, depth });
@@ -909,14 +924,987 @@ function solve(L) {
   };
 }
 
-return { OFF, DK, makeEngine, solve };
+// Split search for levels with several starts. Searching every start's moves
+// together grows too fast, so each start's molecule is planned on its own (an
+// A* search), in a world without the other starts, and the plans are then
+// replayed together. Where they clash (a shared tile or exit, an atom both
+// take or neither takes, too many electrons taken from one cell, a collision,
+// or a molecule touching an atom another one takes), the search branches on
+// which side gives way, adds that as a constraint, and plans that molecule
+// again (conflict-based search). At each clash it also plans one of the
+// starts against the others' paths in the full level (respond()), which finds
+// what separate worlds can't. Every answer replays to a win, but it isn't
+// proven to be the fastest.
+function solveSplit(L, opt = {}) {
+  const GJ = makeEngine(L);
+  if (GJ.startError) return { type: "blocked", message: GJ.startError };
+  const P = L.players, n = L.pos.length;
+  const T = L.tiles.length, NB = T + L.crossings.length, W = Math.ceil(NB / 32) || 1;
+  const tileIdx = new Map(L.tiles.map((p, k) => [p, k]));
+  const crossIdx = new Map(L.crossings.map((p, j) => [p, T + j]));
+  const cross = new Set(L.crossings);
+  const exitIdx = GJ.exitIdx;
+  const pathIdx = (p, d) => (d === "U" || d === "D") && cross.has(p) ? crossIdx.get(p) : tileIdx.get(p);
+  const has = (v, k) => (v[k >> 5] & (1 << (k & 31))) !== 0;
+  const adjacent = (p, q) => { const d = Math.abs(p - q); return d === 1 || d === 1024; };
+  const blocked = [...L.pos, ...L.electrons.map((e) => e.p)];
+  const loose = [];
+  for (let i = P; i < n; i++) loose.push(i);
+  const nbr = new Int32Array(T * 4).fill(-1), crossVi = new Int32Array(T).fill(-1);
+  L.tiles.forEach((p, k) => {
+    DK.forEach((d, j) => {
+      const q = p + OFF[d];
+      if (exitIdx.has(q)) nbr[k * 4 + j] = -2 - exitIdx.get(q);
+      else if (tileIdx.has(q)) nbr[k * 4 + j] = tileIdx.get(q);
+    });
+    if (cross.has(p)) crossVi[k] = crossIdx.get(p);
+  });
+  const exitDirOk = GJ.exits.map((_, k) => DK.map((d) => !L.exitDirs[k] || d === L.exitDirs[k]));
+  const mark = new Int32Array(T), stack = new Int32Array(T);
+  let stamp = 0, planned = 0, plannedStates = 0, hitLimit = false, responds = 0, respondStates = 0, lastStates = 0;
+  const dist = (p, q) => Math.abs((p >> 10) - (q >> 10)) + Math.abs((p & 1023) - (q & 1023));
+  // Scratch tables for subsets of up to 10 atoms (see heur in plan()).
+  const sub = { sum: new Int32Array(1024), max: new Int32Array(1024), cnt: new Int32Array(1024) };
+  function makeHeap(less) {
+    const a = [];
+    return {
+      size: () => a.length,
+      items: () => a,
+      push(x) {
+        a.push(x);
+        let i = a.length - 1;
+        while (i > 0) { const p = (i - 1) >> 1; if (!less(a[i], a[p])) break; [a[p], a[i]] = [a[i], a[p]]; i = p; }
+      },
+      pop() {
+        const top = a[0], last = a.pop();
+        if (a.length) {
+          a[0] = last;
+          for (let i = 0; ;) {
+            const l = 2 * i + 1, r = l + 1;
+            let b = i;
+            if (l < a.length && less(a[l], a[b])) b = l;
+            if (r < a.length && less(a[r], a[b])) b = r;
+            if (b === i) break;
+            [a[b], a[i]] = [a[i], a[b]];
+            i = b;
+          }
+        }
+        return top;
+      },
+    };
+  }
+  // Moves from each tile to the nearest exit not in `taken` (-1: none), ignoring used tiles.
+  const exitDCache = new Map();
+  function exitDistances(taken) {
+    if (exitDCache.has(taken)) return exitDCache.get(taken);
+    const d = new Int32Array(T).fill(-1), queue = [];
+    for (let k = 0; k < T; k++) for (let j = 0; j < 4; j++) {
+      const t = nbr[k * 4 + j];
+      if (t <= -2 && exitDirOk[-2 - t][j] && !(taken >> (-2 - t) & 1) && d[k] < 0) { d[k] = 1; queue.push(k); }
+    }
+    for (let h = 0; h < queue.length; h++) {
+      const k = queue[h];
+      for (let j = 0; j < 4; j++) { const t = nbr[k * 4 + j]; if (t >= 0 && d[t] < 0) { d[t] = d[k] + 1; queue.push(t); } }
+    }
+    exitDCache.set(taken, d);
+    return d;
+  }
+  const bits = (v) => { let c = 0; for (let i = 0; i < W; i++) { let x = v[i]; x -= (x >>> 1) & 0x55555555; x = (x & 0x33333333) + ((x >>> 2) & 0x33333333); c += (((x + (x >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24; } return c; };
+  // The free region from a lead (see solve()): null when it can't reach a free exit.
+  function regionFrom(lead, v, taken) {
+    const free = new Int32Array(W);
+    let found = false, sp = 0;
+    stamp++;
+    const k0 = tileIdx.get(lead);
+    if (k0 === undefined) return null;
+    mark[k0] = stamp; stack[sp++] = k0;
+    while (sp) {
+      const k = stack[--sp];
+      for (let j = 0; j < 4; j++) {
+        const t = nbr[k * 4 + j];
+        if (t === -1) continue;
+        if (t <= -2) { const e = -2 - t; if (exitDirOk[e][j] && !(taken >> e & 1)) found = true; continue; }
+        if (mark[t] === stamp) continue;
+        let open = false;
+        if (!has(v, t)) { free[t >> 5] |= 1 << (t & 31); open = true; }
+        const c = crossVi[t];
+        if (c >= 0 && !has(v, c)) { free[c >> 5] |= 1 << (c & 31); open = true; }
+        if (open) { mark[t] = stamp; stack[sp++] = t; }
+      }
+    }
+    return found ? free : null;
+  }
+  const within = (a, b) => { for (let i = 0; i < W; i++) if ((a[i] & b[i]) !== a[i]) return false; return true; };
+  const deadline = Date.now() + (opt.timeLimit || 60000);
+
+  // The world of start m: its own atom, the loose atoms it may take, and as
+  // many electrons in each cell as it may capture.
+  const worlds = new Map();
+  function world(m, forbid, caps) {
+    const key = m + "|" + [...forbid].sort((a, b) => a - b).join(",") + "|" + caps.join(",");
+    if (worlds.has(key)) return worlds.get(key);
+    const map = [m];
+    for (const i of loose) if (!forbid.has(i)) map.push(i);
+    const emap = [], electrons = [];
+    L.electrons.forEach((e, k) => { if (caps[k] > 0) { emap.push(k); electrons.push({ p: e.p, n: caps[k] }); } });
+    const Lw = { ...L, players: 1, startDirs: [L.startDirs[m]], pos: map.map((i) => L.pos[i]), elems: map.map((i) => L.elems[i]),
+      valence: map.map((i) => L.valence[i]), charge: map.map((i) => L.charge[i]), electrons, pause: true, blocked };
+    const w = { m, map, inv: new Map(map.map((j, i) => [j, i])), emap, einv: new Map(emap.map((k, i) => [k, i])), G: makeEngine(Lw), Lw };
+    worlds.set(key, w);
+    return w;
+  }
+
+  // Constraints (all in full-level terms), checked at time t:
+  //   V: no atom of the molecule (or, with `item`, that atom) in `cell`
+  //   E: no atom of the molecule moves from `from` to `to`
+  //   A: no atom of the molecule that could still react is next to `cell`
+  //   C: atom `item` is in the molecule
+  //   X: none of electron cell `k`'s electrons it may take are left
+  function violates(w, c, s, nxt) {
+    const { inv, einv } = w;
+    switch (c.type) {
+      case "V": {
+        if (c.item !== undefined) { const li = inv.get(c.item); return li !== undefined && nxt.pos[li] === c.cell; }
+        for (let i = 0; i < nxt.pos.length; i++) if (nxt.mid[i] === 0 && nxt.pos[i] === c.cell) return true;
+        return false;
+      }
+      case "E":
+        for (let i = 0; i < nxt.pos.length; i++) if (s.mid[i] === 0 && s.pos[i] === c.from && nxt.pos[i] === c.to) return true;
+        return false;
+      case "A":
+        for (let i = 0; i < nxt.pos.length; i++)
+          if (nxt.mid[i] === 0 && (s.mid[i] < 0 || s.free[i] > 0 || s.charge[i] > 0) && adjacent(nxt.pos[i], c.cell)) return true;
+        return false;
+      case "C": { const li = inv.get(c.item); return li === undefined || nxt.mid[li] < 0; }
+      case "X": { const lk = einv.get(c.k); return lk !== undefined && nxt.elec[lk] > 0; }
+    }
+    return false;
+  }
+  // After the molecule has stopped at its exit at time `end`, it stays as it is.
+  function violatesAfter(w, c, f) {
+    if (c.type === "E" || c.type === "A") return false;
+    return violates(w, c, f, f);
+  }
+
+  // Can the start's molecule be completed from the atoms its world has? Some
+  // set of them (with every required one) must make a connected molecule:
+  // valences summing to an even number, at least two per added atom, and no
+  // atom needing more bonds than all the others together.
+  function completable(w, req) {
+    const { Lw } = w, k = Lw.pos.length - 1;
+    if (k > 16) return true;
+    let reqMask = 0;
+    for (const li of req) reqMask |= 1 << (li - 1);
+    const v0 = Lw.valence[0];
+    for (let mask = 0; mask < 1 << k; mask++) {
+      if ((mask & reqMask) !== reqMask) continue;
+      let sum = v0, max = v0, cnt = 0;
+      for (let i = 0; i < k; i++) if (mask >> i & 1) { const v = Lw.valence[i + 1]; sum += v; max = Math.max(max, v); cnt++; }
+      if (sum % 2 === 0 && sum >= 2 * cnt && max * 2 <= sum && (cnt || !v0)) return true;
+    }
+    return false;
+  }
+
+  // Whether a molecule with `open` free electrons and charges can be completed
+  // by adding all of `need` and some of `opt` (valences), by the same counting
+  // as completable(). Memoised: few distinct cases come up.
+  const completeMemo = new Map();
+  function completes(open, opt, need) {
+    const key = open + "|" + opt.slice().sort().join(",") + "|" + need.slice().sort().join(",");
+    if (completeMemo.has(key)) return completeMemo.get(key);
+    const cnt = new Map();
+    for (const v of opt) cnt.set(v, (cnt.get(v) || 0) + 1);
+    const vals = [...cnt.keys()];
+    let sum0 = open, max0 = open;
+    for (const v of need) { sum0 += v; max0 = Math.max(max0, v); }
+    let ok = false;
+    const rec = (k, sum, max, n) => {
+      if (ok) return;
+      if (k === vals.length) { if (n && sum % 2 === 0 && sum >= 2 * n && max * 2 <= sum) ok = true; return; }
+      const v = vals[k];
+      for (let a = 0; a <= cnt.get(v); a++) rec(k + 1, sum + a * v, a ? Math.max(max, v) : max, n + a);
+    };
+    rec(0, sum0, max0, need.length);
+    completeMemo.set(key, ok);
+    return ok;
+  }
+
+  // A lower bound on the time steps molecule `mol` still needs: its lead's
+  // distance to an exit (not in `taken`), and what it still has to touch: a
+  // set of loose atoms that can complete it (with every atom in `req`) and
+  // electron cells holding at least its charge. For each choice, it has to
+  // reach the farthest of them, travel between any two (less its own length),
+  // and get from each to an exit; with few points, in the best order.
+  function makeBound({ taken, mol, valence, electrons, req, ringPending, rot }) {
+    const exitD = exitDistances(taken);
+    const exitCells = GJ.exits.filter((_, e) => !(taken >> e & 1));
+    const exitMan = (p) => { let d = Infinity; for (const q of exitCells) d = Math.min(d, dist(p, q)); return d; };
+    // Cheapest order to touch every point (pts: position, distance pairs),
+    // stopping early once it can't beat `cut`.
+    const tour = (pts, size, cut) => {
+      const n2 = pts.length >> 1, used = new Uint8Array(n2);
+      let best = cut;
+      const go = (last, cost, left) => {
+        if (cost >= best) return;
+        if (!left) { const c = cost + Math.max(0, exitMan(pts[last * 2]) - size); if (c < best) best = c; return; }
+        for (let i = 0; i < n2; i++) if (!used[i]) {
+          used[i] = 1;
+          go(i, last < 0 ? pts[i * 2 + 1] : cost + Math.max(0, dist(pts[last * 2], pts[i * 2]) - 1 - size), left - 1);
+          used[i] = 0;
+        }
+      };
+      go(-1, 0, n2);
+      return best;
+    };
+    return (s) => {
+      let h = exitD[tileIdx.get(s.pos[mol])];
+      if (h < 0) return Infinity;
+      const molAt = [];
+      let open = 0, charge = 0;
+      for (let i = 0; i < s.pos.length; i++) if (s.mid[i] === mol) { molAt.push(i); open += s.free[i] + s.charge[i]; charge += s.charge[i]; }
+      const near = (p, which) => { let d = Infinity; for (const i of molAt) if (which(i)) d = Math.min(d, dist(s.pos[i], p) - 1); return d; };
+      for (const li of req) if (s.mid[li] < 0) h = Math.max(h, near(s.pos[li], () => true));
+      // What the molecule still has to touch: a set of loose atoms that can
+      // complete it, and electron cells holding at least its charge. For each
+      // choice, it has to reach the farthest of them, travel between any two
+      // (less its own length), and get from each to an exit.
+      const atoms = open && !ringPending(s, mol) && !rot;
+      const ys = [], dy = [];
+      let reqMask = 0;
+      if (atoms) for (let y = 0; y < s.pos.length; y++) if (s.mid[y] < 0 && s.free[y]) {
+        if (req.includes(y)) reqMask |= 1 << ys.length;
+        ys.push(y); dy.push(near(s.pos[y], () => true));
+      }
+      const cells = [];
+      if (charge) electrons.forEach((e, k) => { if (s.elec[k]) cells.push({ p: e.p, n: s.elec[k], d: near(e.p, (i) => s.charge[i] > 0) }); });
+      if (ys.length > 10 || cells.length > 10) {
+        let d = Infinity;
+        for (const x of dy) d = Math.min(d, x);
+        for (const c of cells) d = Math.min(d, c.d);
+        return d < Infinity ? Math.max(h, d) : h;
+      }
+      const atomSets = [];
+      if (atoms) {
+        const k = ys.length, N = 1 << k;
+        sub.sum[0] = open; sub.max[0] = open; sub.cnt[0] = 0;
+        for (let mask = 1; mask < N; mask++) {
+          const i = 31 - Math.clz32(mask & -mask), rest = mask & (mask - 1), v = valence[ys[i]];
+          sub.sum[mask] = sub.sum[rest] + v; sub.max[mask] = Math.max(sub.max[rest], v); sub.cnt[mask] = sub.cnt[rest] + 1;
+          if ((mask & reqMask) !== reqMask) continue;
+          const sm = sub.sum[mask];
+          if (sm % 2 === 0 && sm >= 2 * sub.cnt[mask] && sub.max[mask] * 2 <= sm) atomSets.push(mask);
+        }
+        if (!atomSets.length) return Infinity;
+      } else atomSets.push(0);
+      const cellSets = [];
+      if (charge) {
+        for (let mask = 1; mask < 1 << cells.length; mask++) {
+          let got = 0;
+          for (let i = 0; i < cells.length; i++) if (mask >> i & 1) got += cells[i].n;
+          if (got >= charge) cellSets.push(mask);
+        }
+        if (!cellSets.length) return Infinity;
+      } else cellSets.push(0);
+      const pairs = ys.length + cells.length <= 8 && atomSets.length * cellSets.length <= 64;
+      let best = Infinity;
+      const pts = [];
+      for (const am of atomSets) for (const cm of cellSets) {
+        pts.length = 0;
+        for (let i = 0; i < ys.length; i++) if (am >> i & 1) pts.push(s.pos[ys[i]], dy[i]);
+        for (let i = 0; i < cells.length; i++) if (cm >> i & 1) pts.push(cells[i].p, cells[i].d);
+        const size = molAt.length + sub.cnt[am];
+        let b = 0;
+        for (let x = 0; x < pts.length; x += 2) {
+          b = Math.max(b, pts[x + 1]);
+          if (!pairs) continue;
+          b = Math.max(b, pts[x + 1] + Math.max(0, exitMan(pts[x]) - size));
+          for (let y = x + 2; y < pts.length; y += 2) b = Math.max(b, Math.min(pts[x + 1], pts[y + 1]) + Math.max(0, dist(pts[x], pts[y]) - 1 - size));
+          if (b >= best) break;
+        }
+        // With few points, the best visiting order: first reach, each hop
+        // (less the molecule's length), then the way out.
+        if (pairs && b < best && pts.length && pts.length <= 10) b = Math.max(b, tour(pts, size, best));
+        if (b < best) best = b;
+      }
+      return Math.max(h, best);
+    };
+  }
+
+  // Shortest plan for start m under spec (a single-molecule search, like solve()).
+  // Among the plans with the fewest time steps, it prefers the one sharing the
+  // fewest tiles with `avoid` (the other starts' current paths).
+  const planCache = new Map();
+  const specKey = (m, sp) => [m, [...sp.forbid].sort(), [...sp.req].sort(), sp.caps, [...sp.tileBan].sort(), [...sp.exitBan].sort(),
+    sp.cons.map((c) => [c.type, c.t, c.cell, c.item, c.from, c.to, c.k].join(":")).sort()].join("|");
+  // A plan search that ran out of its state budget (rather than proving there
+  // is no plan) returns OVER; it can be tried again with a larger budget.
+  const OVER = { over: true }, maxStates = opt.planLimit || 400000;
+  function plan(m, spec, avoid, budget = maxStates) {
+    const key = specKey(m, spec), got = planCache.get(key);
+    if (got && !got.over) return got.pl;
+    if (got && got.over >= budget) return OVER;
+    // A retry after running out skips the exact search it already tried.
+    const before = plannedStates, pl = planFresh(m, spec, avoid, budget, !!got);
+    if (opt.planLog) opt.planLog(m, spec, plannedStates - before, pl === OVER ? null : pl);
+    planCache.set(key, pl === OVER ? { over: budget } : { pl });
+    return pl;
+  }
+  function planFresh(m, spec, avoid, budget, retry) {
+    if (Date.now() > deadline) return null;
+    planned++;
+    const w = world(m, spec.forbid, spec.caps);
+    const { G, Lw, inv } = w;
+    if (G.startError) return null;
+    const req = [];
+    for (const j of spec.req) { const li = inv.get(j); if (li === undefined) return null; req.push(li); }
+    const byT = new Map();
+    let maxT = 0;
+    for (const c of spec.cons) {
+      if (!byT.has(c.t)) byT.set(c.t, []);
+      byT.get(c.t).push(c);
+      maxT = Math.max(maxT, c.t);
+    }
+    if ((byT.get(0) || []).some((c) => violates(w, c, G.start, G.start))) return null;
+    if (!completable(w, req)) return null;
+    let taken = 0;
+    for (const e of spec.exitBan) taken |= 1 << e;
+    const v0 = new Int32Array(W);
+    for (let k = 0; k < NB; k++) if (((G.visited0 >> BigInt(k)) & 1n) || spec.tileBan.has(k)) v0[k >> 5] |= 1 << (k & 31);
+    // Other starts' forced first steps always use their tiles.
+    for (let o = 0; o < P; o++) {
+      const d = L.startDirs[o], q = d && L.pos[o] + OFF[d], k = d && !exitIdx.has(q) ? pathIdx(q, d) : undefined;
+      if (o !== m && k !== undefined) v0[k >> 5] |= 1 << (k & 31);
+    }
+    const mol = (s) => { let free = 0, charge = 0; for (let i = 0; i < s.pos.length; i++) if (s.mid[i] === 0) { free += s.free[i]; charge += s.charge[i]; } return [free, charge]; };
+    const won = (s) => {
+      const [free, charge] = mol(s);
+      if (free || charge) return false;
+      for (const li of req) if (s.mid[li] < 0) return false;
+      for (let i = 0; i < s.pos.length; i++) if (s.mid[i] === 0 && !G.tiles.has(s.pos[i])) return false;
+      for (const [t, cs] of byT) if (t > 0) for (const c of cs) if (t > s.t && violatesAfter(w, c, s)) return false;
+      return true;
+    };
+    const alive = (s) => {
+      const [free, charge] = mol(s);
+      if (charge > G.electronsLeft(s)) return false;
+      if (!free && !charge) return !req.some((li) => s.mid[li] < 0);
+      if (G.ringPending(s, 0) || (G.rot.size > 0 && G.openAtoms(s, 0) >= 2)) return true;
+      // Can the loose atoms left (with every required one) still complete it?
+      const opt = [], need = [];
+      for (let i = 1; i < s.pos.length; i++) if (s.mid[i] < 0) (req.includes(i) ? need : opt).push(Lw.valence[i]);
+      return completes(free + charge, opt, need);
+    };
+    const region = (s, v) => regionFrom(s.pos[0], v, taken);
+    // Whether a later constraint can still matter to state s at time tt. If
+    // none can, arriving later is never better, so arrivals at different times
+    // are compared as one state.
+    const timely = (s, tt) => {
+      for (const c of spec.cons) {
+        if (c.t <= tt) continue;
+        if (c.type === "C") { const li = inv.get(c.item); if (li !== undefined && s.mid[li] < 0) return true; continue; }
+        if (c.type === "X") { const lk = w.einv.get(c.k); if (lk !== undefined && s.elec[lk] > 0) return true; continue; }
+        if (c.type === "V" && c.item !== undefined) { if (inv.has(c.item)) return true; continue; }
+        const cell = c.type === "E" ? c.to : c.cell, reach = c.t - tt + 2;
+        for (let i = 0; i < s.pos.length; i++) if (s.mid[i] === 0 && dist(s.pos[i], cell) <= reach) return true;
+      }
+      return false;
+    };
+    const score = (path) => {
+      if (!avoid) return 0;
+      let x = 0, p = L.pos[m];
+      for (const d of path) { p += OFF[d]; const k = exitIdx.has(p) ? -2 - exitIdx.get(p) : pathIdx(p, d); if (avoid.has(k)) x++; }
+      return x;
+    };
+
+    const start = G.start;
+    start.t = 0;
+    // A finished molecule (no free electrons or charge, everything required on
+    // board) just needs the shortest way to an exit, as in solve()'s finish().
+    const canQuick = !cross.size && !G.rot.size;
+    const blockedNow = (s) => { const b = new Set(); for (let i = 0; i < s.pos.length; i++) if (s.mid[i] < 0) b.add(s.pos[i]); Lw.electrons.forEach((e, k) => { if (s.elec[k]) b.add(e.p); }); return b; };
+    function route(s, v) {
+      const lead = s.pos[0], shape = [], blk = blockedNow(s);
+      for (let i = 0; i < s.pos.length; i++) if (s.mid[i] === 0) shape.push(s.pos[i] - lead);
+      const fits = (p) => shape.every((o) => !blk.has(p + o));
+      const inside = (p) => shape.every((o) => G.tiles.has(p + o));
+      const prev = new Map([[lead, null]]), queue = [lead];
+      for (let h = 0; h < queue.length; h++) {
+        const p = queue[h];
+        for (const d of DK) {
+          const q = p + OFF[d], e = exitIdx.get(q);
+          if (!fits(q)) continue;
+          if (e !== undefined) {
+            if (!exitDirOk[e][DK.indexOf(d)] || (taken >> e & 1) || !inside(q)) continue;
+            const out = [d];
+            for (let x = p; prev.get(x); x = prev.get(x)[0]) out.push(prev.get(x)[1]);
+            return out.reverse().join("");
+          }
+          const k = tileIdx.get(q);
+          if (k === undefined || has(v, k) || prev.has(q)) continue;
+          prev.set(q, [p, d]);
+          queue.push(q);
+        }
+      }
+      return null;
+    }
+    if (won(start) && start.done) return finishPlan(m, w, "", spec);
+    // A* over time steps: f = steps so far + makeBound()'s lower bound on the rest.
+    const heur = makeBound({ taken, mol: 0, valence: Lw.valence, electrons: Lw.electrons, req, ringPending: G.ringPending, rot: G.rot.size });
+    const cap = Math.min(capTicks(), L.maxLen || Infinity);
+    // Plain A* first (the shortest plan). If it runs out of states, weight the
+    // estimate: that finds a plan with far fewer states, maybe a little longer.
+    for (const [wt, lim] of opt.tries || (retry ? [[3, budget]] : [[1, Math.min(25000, budget)], [1.5, Math.min(60000, budget)], [3, budget]])) {
+      const r = astar(wt, lim);
+      if (r === "limit") continue;
+      return r === null ? null : finishPlan(m, w, r, spec);
+    }
+    if (budget < maxStates) return OVER;
+    hitLimit = true;
+    return null;
+
+    function astar(wt, lim) {
+    const seen = new Map();
+    const heap = makeHeap((a, b) => a.f !== b.f ? a.f < b.f : a.goal !== b.goal ? !!a.goal : a.g > b.g);
+    const hs = heur(start);
+    heap.push({ f: wt * hs, g: 0, h0: hs, s: start, path: "" });
+    let best = null, states = 0;
+    while (heap.size()) {
+      const e = heap.pop();
+      // The cap compares the unweighted bound (the weighted one overshoots).
+      if (e.g + (e.h0 || 0) > cap) continue;
+      if (e.goal !== undefined) {
+        // Among goals this fast, prefer the one sharing fewest tiles with the others.
+        best = e.goal;
+        let bs = score(best);
+        for (const o of heap.items()) if (o.goal !== undefined && o.f === e.f) { const sc = score(o.goal); if (sc < bs) { best = o.goal; bs = sc; } }
+        break;
+      }
+      if (++states > lim || ((states & 1023) === 0 && Date.now() > deadline)) { plannedStates += states; return "limit"; }
+      const { s, path, g: t, mark } = e;
+      if (mark && mark.dead) continue;
+      // The used tiles are rebuilt from the path rather than stored per state.
+      const v = v0.slice();
+      for (let i = 0, p = L.pos[m]; i < path.length; i++) { p += OFF[path[i]]; const k = pathIdx(p, path[i]); if (k !== undefined) v[k >> 5] |= 1 << (k & 31); }
+      let dirs = DK;
+      if (!path && Lw.startDirs[0]) dirs = [Lw.startDirs[0]];
+      else if (cross.has(s.pos[0]) && path) dirs = [path[path.length - 1]];
+      const paused = s.paused & 1;
+      const opts = paused ? [[null, -1]] : [];
+      if (!paused) for (const d of dirs) {
+        const q = s.pos[0] + OFF[d], ex = exitIdx.get(q);
+        if (ex !== undefined) { if (exitDirOk[ex][DK.indexOf(d)] && !(taken >> ex & 1)) opts.push([d, -1]); continue; }
+        const k = pathIdx(q, d);
+        if (k === undefined || has(v, k)) continue;
+        opts.push([d, k]);
+      }
+      for (const [d, k] of opts) {
+        const nxt = paused ? G.step(s, [null]) : G.step(s, [d]);
+        if (!nxt) continue;
+        nxt.t = t + 1;
+        const cs = byT.get(t + 1);
+        if (cs && cs.some((c) => violates(w, c, s, nxt))) continue;
+        const npath = paused ? path : path + d;
+        if (nxt.done) { if (won(nxt)) heap.push({ f: t + 1, g: t + 1, goal: npath }); continue; }
+        if (!alive(nxt)) continue;
+        const nv = k >= 0 ? v.slice() : v;
+        if (k >= 0) nv[k >> 5] |= 1 << (k & 31);
+        if (canQuick && t + 1 >= maxT && !mol(nxt).some((x) => x) && !req.some((li) => nxt.mid[li] < 0)) {
+          const rest = route(nxt, nv);
+          if (rest !== null) { const ticks = t + 1 + (nxt.paused & 1) + rest.length; heap.push({ f: ticks, g: ticks, goal: npath + rest }); }
+          continue;
+        }
+        const free = region(nxt, nv);
+        if (!free) continue;
+        const h = heur(nxt);
+        if (t + 1 + h > cap) continue;
+        let key = nxt.key;
+        if (t + 1 < maxT && timely(nxt, t + 1)) key += "|" + (t + 1);
+        if (cross.has(nxt.pos[0])) key += "|" + npath[npath.length - 1];
+        // Dominance: an arrival no earlier, with no more free tiles, than an
+        // earlier one at the same state is dropped (and drops what it beats).
+        // (A region can only contain one at least its size, so sizes rule
+        // most pairs out before comparing tiles.)
+        let list = seen.get(key);
+        if (!list) { list = []; seen.set(key, list); }
+        const size = bits(free), g1 = t + 1;
+        if (list.some((x) => x.g <= g1 && x.size >= size && within(free, x.free))) continue;
+        let wi = 0;
+        for (const x of list) { if (g1 <= x.g && size >= x.size && within(x.free, free)) x.mark.dead = true; else list[wi++] = x; }
+        list.length = wi;
+        const mk = { dead: false };
+        list.push({ g: g1, free, size, mark: mk });
+        heap.push({ f: t + 1 + wt * h, g: t + 1, h0: h, s: nxt, path: npath, mark: mk });
+      }
+    }
+    plannedStates += states;
+    lastStates = states;
+    return best;
+    }
+  }
+
+  // What a plan does: its replay, the tiles and exit it uses, and what it takes.
+  function finishPlan(m, w, path, spec) {
+    const run = w.G.simulate([path]);
+    const tiles = new Set();
+    let p = L.pos[m], exit = -1;
+    for (const d of path) {
+      p += OFF[d];
+      if (exitIdx.has(p)) exit = exitIdx.get(p); else tiles.add(pathIdx(p, d));
+    }
+    const f = run.frames[run.frames.length - 1];
+    const takes = new Set(), caught = new Map();
+    for (let i = 1; i < w.map.length; i++) if (f.mid[i] === 0) takes.add(w.map[i]);
+    w.emap.forEach((k, lk) => { const c = w.Lw.electrons[lk].n - f.elec[lk]; if (c) caught.set(k, c); });
+    return { m, w, spec, path, frames: run.frames, ticks: run.frames.length - 1, tiles, exit, takes, caught };
+  }
+
+  const frameAt = (pl, t) => pl.frames[Math.min(t, pl.frames.length - 1)];
+
+  // The first clash between the plans: a list of branches, each a list of
+  // [start, change] pairs, or null when the plans work together.
+  function conflict(plans) {
+    // An atom two plans take, or none does.
+    for (const y of loose) {
+      const by = plans.filter((pl) => pl.takes.has(y));
+      if (by.length > 1) return [[[by[0].m, { forbid: y }]], [[by[1].m, { forbid: y }]]];
+      if (!by.length) {
+        const br = plans.filter((pl) => !pl.spec.forbid.has(y)).map((pl) => [[pl.m, { req: y }]]);
+        return br;
+      }
+    }
+    // Too many electrons taken from one cell.
+    for (let k = 0; k < L.electrons.length; k++) {
+      const by = plans.filter((pl) => pl.caught.has(k));
+      const sum = by.reduce((t, pl) => t + pl.caught.get(k), 0);
+      if (sum > L.electrons[k].n) return by.map((pl) => [[pl.m, { cap: [k, pl.caught.get(k) - 1] }]]);
+    }
+    // An atom one plan takes is still there in another start's world, where it
+    // blocks the way and would bond. Either the taker owns it (it's gone from
+    // every other world) or another start has to take it.
+    for (const y of loose) {
+      const by = plans.find((pl) => pl.takes.has(y));
+      const open = plans.filter((pl) => pl !== by && !pl.spec.forbid.has(y));
+      if (open.length) return [open.map((pl) => [pl.m, { forbid: y }]), ...open.map((pl) => [[pl.m, { req: y }]])];
+    }
+    // Electrons another plan takes: worlds that take none from that cell only
+    // keep what's left over.
+    for (let k = 0; k < L.electrons.length; k++) {
+      const left = L.electrons[k].n - plans.reduce((t, pl) => t + (pl.caught.get(k) || 0), 0);
+      const fix = plans.filter((pl) => !pl.caught.has(k) && pl.spec.caps[k] > left);
+      if (fix.length && fix.length < P) return [fix.map((pl) => [pl.m, { cap: [k, left] }])];
+    }
+    for (let a = 0; a < P; a++) for (let b = a + 1; b < P; b++) {
+      if (plans[a].exit === plans[b].exit) return [[[a, { exitBan: plans[a].exit }]], [[b, { exitBan: plans[a].exit }]]];
+      for (const k of plans[a].tiles) if (plans[b].tiles.has(k)) return [[[a, { tileBan: k }]], [[b, { tileBan: k }]]];
+    }
+    // Replay together and compare with each plan.
+    const owner = new Map();
+    for (const pl of plans) for (const y of pl.takes) owner.set(y, pl.m);
+    const paths = plans.map((pl) => pl.path);
+    let s = GJ.start;
+    if (differs(plans, s, 0)) return [];
+    const idx = new Array(P).fill(0);
+    for (let t = 1; t < 100000; t++) {
+      const dirs = new Array(P).fill(null);
+      let pending = false;
+      for (let m = 0; m < P; m++) {
+        if ((s.done >> m & 1) || idx[m] >= paths[m].length) continue;
+        pending = true;
+        if (!(s.paused >> m & 1)) dirs[m] = paths[m][idx[m]];
+      }
+      if (!pending) break;
+      const why = {};
+      const nxt = GJ.step(s, dirs, why);
+      if (!nxt) return tag(moveConflict(plans, owner, s, why, t));
+      for (let m = 0; m < P; m++) if (dirs[m]) idx[m]++;
+      if (differs(plans, nxt, t)) return tag(reactConflict(plans, owner, s, nxt, t));
+      s = nxt;
+    }
+    return GJ.isWin(s) ? null : [];
+  }
+
+  // Starts in a timing clash, which respond() may fix.
+  function tag(br) {
+    br.dyn = [...new Set(br.flat().map(([m]) => m))];
+    return br;
+  }
+
+  // Plan start m again against the other plans as they are, replaying the
+  // whole level exactly (so it can use what the other molecules do, such as
+  // making a bond ambiguous). Returns the full paths of a win, or null.
+  const responded = new Set();
+  function respond(m, plans) {
+    const paths = plans.map((pl) => pl.path);
+    const rkey = m + "|" + paths.map((p, o) => (o === m ? "" : p)).join("|");
+    if (responded.has(rkey) || Date.now() > deadline) return null;
+    responded.add(rkey);
+    responds++;
+    const v0 = new Int32Array(W);
+    for (let k = 0; k < NB; k++) if ((GJ.visited0 >> BigInt(k)) & 1n) v0[k >> 5] |= 1 << (k & 31);
+    let taken = 0;
+    for (const pl of plans) if (pl.m !== m) { for (const k of pl.tiles) v0[k >> 5] |= 1 << (k & 31); taken |= 1 << pl.exit; }
+    const limit = opt.respondLimit || 300000;
+    const cap = Math.min(capTicks(), L.maxLen || Infinity);
+    // A* again: the bound is what this molecule still needs (makeBound(),
+    // counting every loose atom as one it might take), or the moves another
+    // path still has to make.
+    const bound = makeBound({ taken, mol: m, valence: L.valence, electrons: L.electrons, req: [], ringPending: GJ.ringPending, rot: GJ.rot.size });
+    const heur = (s, idx) => {
+      let h = s.done >> m & 1 ? 0 : bound(s);
+      for (let o = 0; o < P; o++) if (o !== m && !(s.done >> o & 1)) h = Math.max(h, paths[o].length - idx[o]);
+      return h;
+    };
+    // Plain A* first, then weighted (fewer states, maybe a little slower).
+    for (const [wt, lim] of [[1, limit / 5], [2, limit]]) {
+      const r = astarR(wt, lim);
+      if (r !== "limit") return r;
+    }
+    hitLimit = true;
+    return null;
+
+    function astarR(wt, lim) {
+    const seen = new Map();
+    const heap = makeHeap((a, b) => a.f !== b.f ? a.f < b.f : a.g > b.g);
+    const idx0 = new Array(P).fill(0);
+    const h00 = heur(GJ.start, idx0);
+    heap.push({ f: wt * h00, g: 0, h0: h00, s: GJ.start, v: v0, path: "", idx: idx0 });
+    let states = 0;
+    while (heap.size()) {
+      const { g: t, s, v, path, idx, stale, h0 } = heap.pop();
+      if (t + h0 > cap) continue;
+      if (stale && stale.dead) continue;
+      if (++states > lim || ((states & 1023) === 0 && Date.now() > deadline)) { respondStates += states; return "limit"; }
+      const dirs = new Array(P).fill(null);
+      let pending = false;
+      for (let o = 0; o < P; o++) {
+        if (o === m || (s.done >> o & 1) || idx[o] >= paths[o].length) continue;
+        pending = true;
+        if (!(s.paused >> o & 1)) dirs[o] = paths[o][idx[o]];
+      }
+      const mine = [];
+      if (!(s.done >> m & 1)) {
+        pending = true;
+        if (s.paused >> m & 1) mine.push([null, -1]);
+        else {
+          let ds = DK;
+          if (!path && L.startDirs[m]) ds = [L.startDirs[m]];
+          else if (cross.has(s.pos[m]) && path) ds = [path[path.length - 1]];
+          for (const d of ds) {
+            const q = s.pos[m] + OFF[d], e = exitIdx.get(q);
+            if (e !== undefined) { if (exitDirOk[e][DK.indexOf(d)] && !(taken >> e & 1)) mine.push([d, -1]); continue; }
+            const k = pathIdx(q, d);
+            if (k !== undefined && !has(v, k)) mine.push([d, k]);
+          }
+        }
+      } else mine.push([null, -1]);
+      if (!pending) { if (GJ.isWin(s)) { respondStates += states; const full = paths.slice(); full[m] = path; return full; } continue; }
+      for (const [d, k] of mine) {
+        dirs[m] = d;
+        const nxt = GJ.step(s, dirs);
+        if (!nxt || !GJ.canFinish(nxt)) continue;
+        const nidx = idx.slice();
+        for (let o = 0; o < P; o++) if (o !== m && dirs[o]) nidx[o]++;
+        const nv = k >= 0 ? v.slice() : v;
+        if (k >= 0) nv[k >> 5] |= 1 << (k & 31);
+        const npath = d ? path + d : path;
+        let free = null;
+        if (!(nxt.done >> m & 1)) { free = regionFrom(nxt.pos[m], nv, taken); if (!free) continue; }
+        const h = heur(nxt, nidx);
+        if (t + 1 + h > cap) continue;
+        let key = nxt.key + "|" + nidx.join(",");
+        if (cross.has(nxt.pos[m]) && npath) key += "|" + npath[npath.length - 1];
+        let list = seen.get(key);
+        if (!list) { list = []; seen.set(key, list); }
+        if (list.some((x) => x.g <= t + 1 && (free ? x.free && within(free, x.free) : true))) continue;
+        const mark = { dead: false };
+        let wi = 0;
+        for (const x of list) { if (t + 1 <= x.g && (x.free ? free && within(x.free, free) : true)) x.mark.dead = true; else list[wi++] = x; }
+        list.length = wi;
+        list.push({ g: t + 1, free, mark });
+        heap.push({ f: t + 1 + wt * h, g: t + 1, h0: h, s: nxt, v: nv, path: npath, idx: nidx, stale: mark });
+      }
+    }
+    respondStates += states;
+    return null;
+    }
+  }
+
+  function differs(plans, s, t) {
+    for (const pl of plans) {
+      const f = frameAt(pl, t), { map, m } = pl.w;
+      // Only the molecule itself: atoms it leaves alone stand still in its own
+      // world, but another molecule may take them away.
+      for (let i = 0; i < map.length; i++) {
+        const j = map[i];
+        if ((s.mid[j] === m) !== (f.mid[i] === 0)) return true;
+        if (f.mid[i] === 0 && s.pos[j] !== f.pos[i]) return true;
+        if (f.mid[i] === 0 && (s.free[j] !== f.free[i] || s.charge[j] !== f.charge[i])) return true;
+      }
+      for (let j = 0; j < n; j++) if (s.mid[j] === m && !pl.w.inv.has(j)) return true;
+    }
+    return false;
+  }
+
+  function moveConflict(plans, owner, s, why, t) {
+    const X = s.mid[why.i], c = why.cell;
+    if (X < 0) return [];
+    if (why.kind === "atom") {
+      const j = why.j;
+      if (s.mid[j] >= 0) return [[[X, { con: { type: "V", t, cell: c } }]], [[s.mid[j], { con: { type: "V", t, cell: c } }]]];
+      const Y = owner.get(j);
+      const br = [[[X, { con: { type: "V", t, cell: c } }]]];
+      if (Y !== undefined && Y !== X) br.push([[Y, { con: { type: "V", t, cell: c, item: j } }]]);
+      return br;
+    }
+    if (why.kind === "electron") {
+      const k = why.e, others = plans.filter((pl) => pl.m !== X && pl.spec.caps[k] > 0);
+      const br = [[[X, { con: { type: "V", t, cell: c } }]]];
+      if (others.length && t > 1) br.push(others.map((pl) => [pl.m, { con: { type: "X", t: t - 1, k } }]));
+      return br;
+    }
+    if (why.kind === "molecules") {
+      const Y = s.mid[why.j];
+      if (why.swap) {
+        const a = s.pos[why.i];
+        return [[[X, { con: { type: "E", t, from: a, to: c } }]], [[Y, { con: { type: "E", t, from: c, to: a } }]]];
+      }
+      return [[[X, { con: { type: "V", t, cell: c } }]], [[Y, { con: { type: "V", t, cell: c } }]]];
+    }
+    return [];
+  }
+
+  function reactConflict(plans, owner, s, nxt, t) {
+    for (const pl of plans) {
+      const { map, inv, einv, m } = pl.w, f0 = frameAt(pl, t - 1), f1 = frameAt(pl, t);
+      for (let i = 0; i < map.length; i++) {
+        if (f1.mid[i] !== 0) continue;
+        const p = f1.pos[i];
+        if (f0.mid[i] < 0 || f0.free[i] > 0 || f0.charge[i] > 0) {
+          for (let y = P; y < n; y++) {
+            if (s.mid[y] >= 0 || inv.has(y) || !adjacent(p, s.pos[y])) continue;
+            const br = [[[m, { con: { type: "A", t, cell: s.pos[y] } }]]];
+            const Y = owner.get(y);
+            if (Y !== undefined && t > 1) br.push([[Y, { con: { type: "C", t: t - 1, item: y } }]]);
+            return br;
+          }
+        }
+        if (f0.mid[i] === 0 && f0.charge[i] > 0) {
+          for (let k = 0; k < L.electrons.length; k++) {
+            const e = L.electrons[k];
+            if (!s.elec[k] || !adjacent(p, e.p)) continue;
+            const lk = einv.get(k), vis = lk === undefined ? 0 : f0.elec[lk];
+            if (s.elec[k] <= vis) continue;
+            const br = [[[m, { con: { type: "A", t, cell: e.p } }]]];
+            const others = plans.filter((o) => o.m !== m && o.spec.caps[k] > 0);
+            if (others.length && t > 1) br.push(others.map((o) => [o.m, { con: { type: "X", t: t - 1, k } }]));
+            return br;
+          }
+        }
+      }
+    }
+    return [];
+  }
+
+  // Search: nodes ordered by time steps (the slowest plan), then by how many
+  // tiles the plans share.
+  const blankSpec = () => ({ forbid: new Set(), req: new Set(), caps: L.electrons.map((e) => e.n), tileBan: new Set(), exitBan: new Set(), cons: [] });
+  const avoidOf = (plans, m) => {
+    const a = new Set();
+    for (const pl of plans) if (pl && pl.m !== m) { for (const k of pl.tiles) a.add(k); a.add(-2 - pl.exit); }
+    return a;
+  };
+  const overlap = (plans) => {
+    let x = 0;
+    for (let a = 0; a < P; a++) for (let b = a + 1; b < P; b++) for (const k of plans[a].tiles) if (plans[b].tiles.has(k)) x++;
+    return x;
+  };
+  // Each starting point (one per share of the atoms, or the single one) keeps
+  // three queues over its nodes, popped in turn: cheapest first (to improve
+  // the answer); fewest clashes plus tile bans (to find one quickly, trying
+  // other choices of who takes what before squeezing paths apart a tile at a
+  // time); and a dive (the newest clash's first branch, which for an atom is
+  // "the start that took it keeps it"). Each pop goes to the starting point
+  // that has used the least work so far, so none can take all the time.
+  const costLess = (a, b) => a.cost !== b.cost ? a.cost < b.cost : a.h !== b.h ? a.h < b.h : a.id < b.id;
+  const clashLess = (a, b) => a.h + a.bans !== b.h + b.bans ? a.h + a.bans < b.h + b.bans : a.cost !== b.cost ? a.cost < b.cost : a.id > b.id;
+  const diveLess = (a, b) => a.dive > b.dive;
+  const roots = new Map();
+  const rootOf = (r) => {
+    // Shares start as if they had used some work, so the open start (r < 0)
+    // gets a head start.
+    if (!roots.has(r)) roots.set(r, { q: [makeHeap(costLess), makeHeap(clashLess), makeHeap(diveLess)], work: r < 0 ? 0 : 15000, turn: 0 });
+    return roots.get(r);
+  };
+  const push = (node) => { for (const h of rootOf(node.root).q) h.push(node); };
+  const useless = (node) => node.taken || (best && node.cost >= best.ticks);
+  const live = (R) => { const h = R.q[0]; while (h.size() && useless(h.items()[0])) h.pop(); return h.size() > 0; };
+  let family = 0;
+  const pop = () => {
+    for (;;) {
+      let R = null;
+      // The open start stops taking turns after 100k states without an answer.
+      const load = (x) => (x === roots.get(-1) && x.work > 100000 && !best ? x.work + 1e9 : x.work);
+      for (const x of roots.values()) if (live(x) && (!R || load(x) < load(R))) R = x;
+      if (!R) return null;
+      const h = R.q[R.turn++ % 3];
+      if (!h.size()) continue;
+      const node = h.pop();
+      if (useless(node)) continue;
+      node.taken = true;
+      return node;
+    }
+  };
+  // Clashes to resolve: shared tiles, atoms taken twice or not at all, atoms
+  // still in a world while another plan takes them, shared exits.
+  const clashes = (plans) => {
+    let x = overlap(plans);
+    for (const y of loose) {
+      const by = plans.filter((pl) => pl.takes.has(y)).length;
+      if (by !== 1) x++;
+      x += plans.filter((pl) => !pl.takes.has(y) && !pl.spec.forbid.has(y)).length && by ? 1 : 0;
+    }
+    for (let a = 0; a < P; a++) for (let b = a + 1; b < P; b++) if (plans[a].exit === plans[b].exit) x++;
+    return x;
+  };
+  let ids = 0;
+  // Plans as slow as the best full solution so far can't lead to a better one.
+  let best = null;
+  const capTicks = () => (best ? best.ticks - 1 : Infinity);
+  const makeNode = (plans) => ({ plans, cost: Math.max(...plans.map((pl) => pl.ticks)), h: clashes(plans), bans: plans.reduce((t, pl) => t + pl.spec.tileBan.size, 0), id: ids++ });
+
+  if (opt.debug) Object.assign(opt.debug, { stats: () => ({ plannedStates, lastStates, respondStates }), respond, world, plan, finishPlan, conflict, blankSpec, GJ, violates, violatesAfter });
+  if (opt.noSearch) return null;
+  // Starting points. When there are few ways to share the loose atoms out
+  // (each start's share has to be able to complete its molecule), there is one
+  // per way, with every atom owned, so no world holds atoms it won't take.
+  // Otherwise there is one, where every start may take any atom and who owns
+  // what is settled clash by clash.
+  const shares = [];
+  if (Math.pow(P, loose.length) <= 4096) {
+    const owner = new Array(loose.length);
+    const go = (k) => {
+      if (shares.length > 64) return;
+      if (k === loose.length) {
+        for (let m = 0; m < P; m++) {
+          const vals = loose.filter((_, i) => owner[i] === m).map((y) => L.valence[y]);
+          if (!completes(L.valence[m], [], vals)) return;
+        }
+        shares.push(owner.slice());
+        return;
+      }
+      for (let m = 0; m < P; m++) { owner[k] = m; go(k + 1); }
+    };
+    go(0);
+  }
+  if (shares.length && shares.length <= 64) {
+    // The open start (anyone may take anything) too, with a head start: it
+    // often finds a first answer fastest.
+    if (opt.open !== false) push({ share: null, root: -1, cost: 0, h: 0, bans: 0, dive: 0, id: ids++ });
+    shares.forEach((own, r) => push({ share: own, root: r, cost: 0, h: 0, bans: 0, dive: 0, id: ids++ }));
+  } else {
+    const rootPlans = [];
+    for (let m = 0; m < P; m++) {
+      const pl = plan(m, blankSpec(), avoidOf(rootPlans, m));
+      if (!pl) return { type: hitLimit ? "limit" : "none", nodes: 0, split: true, planned, plannedStates, responds, respondStates };
+      rootPlans.push(pl);
+    }
+    push({ ...makeNode(rootPlans), dive: 0, root: 0 });
+  }
+  let nodes = 0, last = null, lastSpent = 0;
+  const nodeLimit = opt.nodeLimit || 20000;
+  const result = (full) => {
+      const run = GJ.simulate(full);
+      const shown = full.map((p, m) => (L.startDirs[m] ? p.slice(1) : p));
+      return {
+        type: "done", split: true, paths: shown, full, nodes, planned, plannedStates, responds, respondStates, ticks: run.frames.length - 1,
+        moves: shown.reduce((t, p) => t + p.length, 0), moveTicks: run.moveTicks,
+        frames: run.frames.map((f) => ({ pos: f.pos, mid: f.mid, bonds: f.bonds, free: f.free, charge: f.charge, elec: f.elec })),
+      };
+  };
+  // A win becomes the best answer; the search goes on while cheaper branches
+  // remain (and plans as slow as it are cut).
+  const found = (full) => {
+    const ticks = GJ.simulate(full).frames.length - 1;
+    if (!best || ticks < best.ticks) { best = { full, ticks }; if (opt.onBest) opt.onBest(result(full)); }
+  };
+  for (;;) {
+    if (++nodes > nodeLimit || Date.now() > deadline) return best ? result(best.full) : { type: "limit", nodes, split: true, planned, plannedStates, responds, respondStates };
+    if (nodes % 20 === 0 && opt.progress) opt.progress(nodes, best && best.ticks);
+    // The work since the last pop belongs to the last node's share.
+    if (last) rootOf(last.root).work += plannedStates + respondStates - lastSpent;
+    const node = pop();
+    if (!node) break;
+    last = node; lastSpent = plannedStates + respondStates;
+    if (node.share !== undefined) {
+      const plans = [];
+      for (let m = 0; m < P && plans.length === m; m++) {
+        const spec = blankSpec();
+        if (node.share) loose.forEach((y, i) => (node.share[i] === m ? spec.req : spec.forbid).add(y));
+        const pl = plan(m, spec, avoidOf(plans, m));
+        if (pl) plans.push(pl);
+      }
+      if (plans.length === P) push({ ...makeNode(plans), dive: ++family * 64, root: node.root });
+      continue;
+    }
+    if (node.wait) {
+      const { plans, m, spec, budget } = node.wait, more = Math.min(maxStates, budget * 4);
+      const pl = plan(m, spec, avoidOf(plans, m), more);
+      if (pl === OVER) push({ ...node, id: ids++, taken: false, wait: { plans, m, spec, budget: more }, h: node.h + 1 });
+      else if (pl) { plans[m] = pl; push({ ...makeNode(plans), dive: node.dive, root: node.root }); }
+      continue;
+    }
+    if (L.maxLen && node.cost > L.maxLen) break;
+    const br = conflict(node.plans);
+    if (opt.log) opt.log(node, br);
+    if (br === null) { found(node.plans.map((pl) => pl.path)); continue; }
+    // Try each start in the clash against the others' plans as they are.
+    for (const m of br.dyn || new Set(br.flat().map(([x]) => x))) { const full = respond(m, node.plans); if (full) found(full); }
+    const fam = ++family;
+    for (const [bi, branch] of br.entries()) {
+      const plans = node.plans.slice(), dive = fam * 64 - bi;
+      let ok = true;
+      // A branch changing one start first plans it on a small budget; if that
+      // runs out, the branch waits in the queue (behind its cheaper siblings)
+      // and gets a larger budget when it comes up.
+      const budget = branch.length === 1 ? Math.min(maxStates, 30000) : maxStates;
+      for (const [m, ch] of branch) {
+        const old = plans[m].spec;
+        const spec = { forbid: new Set(old.forbid), req: new Set(old.req), caps: old.caps.slice(), tileBan: new Set(old.tileBan), exitBan: new Set(old.exitBan), cons: old.cons.slice() };
+        if (ch.forbid !== undefined) { if (spec.req.has(ch.forbid)) { ok = false; break; } spec.forbid.add(ch.forbid); }
+        if (ch.req !== undefined) spec.req.add(ch.req);
+        if (ch.cap) spec.caps[ch.cap[0]] = ch.cap[1];
+        if (ch.tileBan !== undefined) spec.tileBan.add(ch.tileBan);
+        if (ch.exitBan !== undefined) spec.exitBan.add(ch.exitBan);
+        if (ch.con) { spec.cons.push(ch.con); if (ch.con.type === "C") spec.req.add(ch.con.item); }
+        const pl = plan(m, spec, avoidOf(plans, m), budget);
+        if (pl === OVER) { push({ ...node, id: ids++, taken: false, wait: { plans, m, spec, budget }, h: node.h + 1, dive }); ok = false; break; }
+        if (!pl) { ok = false; break; }
+        plans[m] = pl;
+      }
+      if (ok) push({ ...makeNode(plans), dive, root: node.root });
+    }
+  }
+  return best ? result(best.full) : { type: hitLimit ? "limit" : "none", nodes, split: true, planned, plannedStates, responds, respondStates };
+}
+
+return { OFF, DK, makeEngine, solve, solveSplit };
 })();
 
 if (typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope) {
+  // Several starts: a short exact search first (it proves the fastest answer
+  // on easy levels), then the split search if that runs out of states.
+  const QUICK_STATES = 300000, QUICK_MS = 5000;
   self.onmessage = (e) => {
-    const t0 = performance.now();
+    const t0 = performance.now(), L = e.data;
     try {
-      const res = Engine.solve(e.data);
+      let res = Engine.solve(L.players > 1 ? { ...L, limit: Math.min(L.limit, QUICK_STATES), deadline: Date.now() + QUICK_MS } : L);
+      if (L.players > 1 && res.type === "limit") {
+        res = Engine.solveSplit(L, {
+          timeLimit: L.timeLimit * 1000,
+          progress: (nodes, best) => self.postMessage({ type: "progress", split: true, nodes, best }),
+          onBest: (r) => self.postMessage({ ...r, type: "best", ms: Math.round(performance.now() - t0) }),
+        });
+      }
       res.ms = Math.round(performance.now() - t0);
       self.postMessage(res);
     } catch (err) {
@@ -981,6 +1969,7 @@ let sol = null;         // solved result for playback
 let cur = 0;
 let playTimer = null;
 let worker = null;
+let bestSoFar = null;   // the split search's best answer while it runs
 
 const $ = (id) => document.getElementById(id);
 const valenceOf = (el) => (M.valence[el] ?? VAL[el] ?? 1);
@@ -1164,6 +2153,7 @@ function buildLevel() {
     charge: atoms.map((a) => a.charge),
     maxLen: Math.max(0, +$("maxLen").value || 0),
     limit: Math.max(10000, +$("limit").value || 3000000),
+    timeLimit: Math.max(5, +$("timeLimit").value || 180),
   };
 }
 
@@ -1509,14 +2499,20 @@ function runSolve() {
   $("solve").disabled = true; $("cancel").hidden = false;
   setStatus("Searching…");
   const t0 = performance.now();
+  bestSoFar = null;
   worker.onmessage = ({ data }) => {
+    if (data.type === "best") { bestSoFar = { L, data }; return; }
     if (data.type === "progress") {
-      setStatus(`Searching… <b>${data.nodes.toLocaleString()}</b> states, up to ${data.depth} ${L.players > 1 ? "time steps" : "moves"}.`);
+      if (data.split) setStatus(`Planning each start separately… <b>${data.nodes.toLocaleString()}</b> branches tried.${data.best ? ` Best so far: ${data.best} time steps.` : ""}`);
+      else setStatus(`Searching… <b>${data.nodes.toLocaleString()}</b> states, up to ${data.depth} ${L.players > 1 ? "time steps" : "moves"}.`);
       return;
     }
     finishWorker();
     const secs = ((data.ms ?? performance.now() - t0) / 1000).toFixed(2);
+    // The split search returns its best answer when time runs out; without one, say so.
     if (data.type === "done") showSolution(L, data, secs);
+    else if (data.split && data.type === "limit") setStatus(`No solution found within the time limit (${data.nodes.toLocaleString()} branches, ${secs}s). Raise the time limit to search longer.`, "err");
+    else if (data.split && data.type === "none") setStatus(`No solution found (${data.nodes.toLocaleString()} branches, ${secs}s). Planning each start separately can miss solutions where the starts depend on each other's timing.`, "err");
     else if (data.type === "blocked") setStatus(data.message + " Fix the level in Edit mode.", "err");
     else if (data.type === "none") setStatus(`No solution. Searched ${data.nodes.toLocaleString()} states in ${secs}s.${L.maxLen ? " Try raising Max time steps." : ""}`, "err");
     else if (data.type === "limit") setStatus(`Stopped after ${data.nodes.toLocaleString()} states (up to ${data.depth} ${L.players > 1 ? "time steps" : "moves"}) without a solution. Raise the state limit to search further.`, "err");
@@ -1540,7 +2536,7 @@ function pathCells(origin, dirs) {
   return out;
 }
 
-function showSolution(L, data, secs) {
+function showSolution(L, data, secs, stopped = false) {
   let r0 = 0, c0 = 0, r1 = M.h - 1, c1 = M.w - 1;
   for (const f of data.frames) for (const p of f.pos) {
     const [r, c] = dec(p);
@@ -1553,7 +2549,11 @@ function showSolution(L, data, secs) {
   cur = 0;
   const steps = P > 1 ? `, ${data.ticks} time steps` : "";
   const lines = data.paths.map((p, m) => `${P > 1 ? `<span class="swatch" style="background:${PATHC[m]}"></span>` : ""}${p}<br>${[...p].map((d) => ARROW[d]).join("")}`);
-  setStatus(`<b>Solved in ${data.moves} moves${steps}</b> (${data.nodes.toLocaleString()} states, ${secs}s)<div class="solution">${lines.join("<br>")}</div>`, "ok");
+  const work = data.split ? `${data.nodes.toLocaleString()} branches, ${secs}s` : `${data.nodes.toLocaleString()} states, ${secs}s`;
+  const note = !data.split ? "" : stopped ? "<br>Stopped early: this is the best found so far, and a faster solution may exist."
+    : "<br>Found by planning each start separately, so a faster solution may exist.";
+  sol.split = !!data.split;
+  setStatus(`<b>Solved in ${data.moves} moves${steps}</b> (${work})${note}<div class="solution">${lines.join("<br>")}</div>`, "ok");
   // One row of moves per path; each move is labelled with the time step it happens in.
   $("moves").innerHTML = `<div class="pathrows">${data.full.map((dirs, m) => {
     const auto = L.startDirs[m] ? 1 : 0;
@@ -1756,7 +2756,8 @@ function afterTryChange() {
   } else if (won) {
     let extra = "";
     if (sol && P === 1) extra = sol.moves < moves ? ` The shortest solution takes ${sol.moves}.` : " That's the shortest possible.";
-    if (sol && P > 1) extra = sol.ticks < ticks ? ` The fastest solution takes ${sol.ticks} time steps.` : " That's the fastest possible.";
+    if (sol && P > 1 && !sol.split) extra = sol.ticks < ticks ? ` The fastest solution takes ${sol.ticks} time steps.` : " That's the fastest possible.";
+    if (sol && P > 1 && sol.split) extra = sol.ticks < ticks ? ` The solver found one in ${sol.ticks} time steps.` : " That's as fast as the solver's best.";
     tryMessage(`<b>Solved in ${moves} moves${P > 1 ? ` and ${ticks} time steps` : ""}!</b>${extra}`, "win");
   } else if (game.sim.error) {
     // A collision hidden while dragging: describe the time step shown.
@@ -1919,7 +2920,12 @@ function init() {
   board.addEventListener("pointercancel", stop);
 
   $("solve").addEventListener("click", runSolve);
-  $("cancel").addEventListener("click", () => { finishWorker(); setStatus("Search stopped."); });
+  $("cancel").addEventListener("click", () => {
+    finishWorker();
+    // Keep the best answer the split search had found.
+    if (bestSoFar) showSolution(bestSoFar.L, bestSoFar.data, (bestSoFar.data.ms / 1000).toFixed(2), true);
+    else setStatus("Search stopped.");
+  });
   $("first").addEventListener("click", () => { stopPlay(); go(0); });
   $("prev").addEventListener("click", () => { stopPlay(); go(cur - 1); });
   $("next").addEventListener("click", () => { stopPlay(); go(cur + 1); });
